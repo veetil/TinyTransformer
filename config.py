@@ -1,6 +1,15 @@
 
 from collections import namedtuple
 
+def is_float(string):
+    try:
+        float(string)
+        return True
+    except ValueError:
+        return False
+
+
+
 def read_config():
     config = {}
     with open('config.txt') as f:
@@ -15,10 +24,13 @@ def read_config():
                     config[key] = True
                 elif value.lower() == 'false':
                     config[key] = False
-                elif '.' in value:
+                elif str.isdigit(str(value)):
+                    config[key] = int(value)
+                elif is_float(str(value)):
                     config[key] = float(value)
                 else:
-                    config[key] = int(value)
+                    ## throw error ValueError
+                    raise ValueError
             except ValueError:
                 print(f"Error in config.txt: Invalid value for key '{key}'")
             except Exception:

@@ -55,6 +55,7 @@ class FeedForwardLayer(nn.Module):
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
         super().__init__()
+        self.config = config
         assert( config.EMBED % config.N_HEAD == 0 ) 
         self.c_attn = nn.Linear( config.EMBED , 3*config.EMBED, bias = config.bias )
 
@@ -68,10 +69,10 @@ class SelfAttentionLayer(nn.Module):
     def forward(self,x):
         B, T, C = x.size()
 
-        q, k, v =  self.c_attn(x).split(config.EMBED, dim = 2 )
-        q = q.view( B, T, config.N_HEAD, C // config.N_HEAD  ).transpose(1,2) # B, nh, T, C//nh 
-        k = k.view( B, T, config.N_HEAD, C // config.N_HEAD  ).transpose(1,2)
-        v = v.view( B, T, config.N_HEAD, C // config.N_HEAD  ).transpose(1,2)
+        q, k, v =  self.c_attn(x).split(self.config.EMBED, dim = 2 )
+        q = q.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2) # B, nh, T, C//nh 
+        k = k.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
+        v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
 
         att = q@k.transpose(-2,-1)/math.sqrt( k.size(-1) ) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) 
         att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
@@ -105,7 +106,7 @@ class GPT2Block(nn.Module):
 class GPT2Model( nn.Module ):
     def __init__(self, config):
         super().__init__()
-                
+        self.config = config
         self.wte = nn.Embedding(config.VOCAB, config.EMBED)
         self.wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED)
         self.drop = nn.Dropout( p =config.EMBED_DROPOUT )
@@ -117,7 +118,7 @@ class GPT2Model( nn.Module ):
         ## initial weight-tying, but how to make sure it stays tied 
         self.lm_head.weight = self.wte.weight 
 
-        self.appy(self._init_weights)
+        self.apply(self._init_weights)
 
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
@@ -157,6 +158,7 @@ class GPT2Model( nn.Module ):
             logits = self.lm_head(x) # (B,T,V)
             ## return only the last token in each batch
             logits = logits[:,[-1],:] #(B,1,V)
+            loss  = None
 
         return logits, loss 
 
