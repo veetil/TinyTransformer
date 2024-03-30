@@ -80,14 +80,6 @@ GPT2Model(
 )            
 """
 
-#class LayerNorm(nn.Module):
-#    def __init__(self, config):
-#        super().__init__()
-#        self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS)
-
-#    def forward(self, x):
-#        return self.ln_1(x)
-    
 
 class GPT2Block(nn.Module):
     def __init__(self, config):
