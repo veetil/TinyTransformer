@@ -91,9 +91,9 @@ class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS)
+        self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         self.attn = SelfAttentionLayer(config)
-        self.ln_2 = nn.LayerNorm(config.EMBED, eps=config.EPS)
+        self.ln_2 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         self.mlp =  FeedForwardLayer( config ) 
 
     def forward(self,x):
@@ -112,11 +112,12 @@ class GPT2Model( nn.Module ):
         self.drop = nn.Dropout( p =config.EMBED_DROPOUT )
         self.h = [ GPT2Block(config) for _ in range(config.LAYERS) ]
 
-        self.ln_f = nn.LayerNorm(config.EMBED, eps=config.EPS)
+        self.ln_f = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         self.lm_head = nn.Linear( config.EMBED, config.VOCAB, bias = False )
 
         ## initial weight-tying, but how to make sure it stays tied 
-        self.lm_head.weight = self.wte.weight 
+        ## TODO: make sure the weights stay tied
+        self.wte.weight  = self.lm_head.weight 
 
         self.apply(self._init_weights)
 
@@ -155,9 +156,9 @@ class GPT2Model( nn.Module ):
             logits = self.lm_head(x)
             loss = F.cross_entropy( logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            logits = self.lm_head(x) # (B,T,V)
             ## return only the last token in each batch
-            logits = logits[:,[-1],:] #(B,1,V)
+            x_ = x[:,[-1],:]
+            logits = self.lm_head(x_) # (B,T,V)
             loss  = None
 
         return logits, loss 
