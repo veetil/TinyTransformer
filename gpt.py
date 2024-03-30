@@ -4,6 +4,40 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torch 
 
+
+## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
+## Author: Vineeth Veetil 
+## The code is based on the OpenAI GPT-2 implementation, but has been modified to be more readable and to allow for easy modification.
+## Below is the GPT-2 architecture as implemented in this code.
+## GPT architecture
+"""
+GPT2Model(
+  (wte): Embedding(50257, 768)
+  (wpe): Embedding(1024, 768)
+  (drop): Dropout(p=0.1, inplace=False)
+  (h): ModuleList(
+    (0-11): 12 x GPT2Block(
+      (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+      (attn): GPT2Attention(
+        (c_attn): Conv1D()
+        (c_proj): Conv1D()
+        (attn_dropout): Dropout(p=0.1, inplace=False)
+        (resid_dropout): Dropout(p=0.1, inplace=False)
+      )
+      (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+      (mlp): GPT2MLP(
+        (c_fc): Conv1D()
+        (c_proj): Conv1D()
+        (act): NewGELUActivation()
+        (dropout): Dropout(p=0.1, inplace=False)
+      )
+    )
+  )
+  (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+)            
+"""
+
+
 class FeedForwardLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -51,40 +85,10 @@ class SelfAttentionLayer(nn.Module):
         return y 
     
  
- 
-## GPT architecture
-"""
-GPT2Model(
-  (wte): Embedding(50257, 768)
-  (wpe): Embedding(1024, 768)
-  (drop): Dropout(p=0.1, inplace=False)
-  (h): ModuleList(
-    (0-11): 12 x GPT2Block(
-      (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-      (attn): GPT2Attention(
-        (c_attn): Conv1D()
-        (c_proj): Conv1D()
-        (attn_dropout): Dropout(p=0.1, inplace=False)
-        (resid_dropout): Dropout(p=0.1, inplace=False)
-      )
-      (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-      (mlp): GPT2MLP(
-        (c_fc): Conv1D()
-        (c_proj): Conv1D()
-        (act): NewGELUActivation()
-        (dropout): Dropout(p=0.1, inplace=False)
-      )
-    )
-  )
-  (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-)            
-"""
-
 
 class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        config = config.read_config()
 
         self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS)
         self.attn = SelfAttentionLayer(config)
@@ -98,16 +102,10 @@ class GPT2Block(nn.Module):
         x = x + self.mlp(x_) 
         return x 
 
-
-
 class GPT2Model( nn.Module ):
     def __init__(self, config):
         super().__init__()
-        self.config = config.read_config()
-
-
-#  (wte): Embedding(50257, 768)
-# (wpe): Embedding(1024, 768)
+                
         self.wte = nn.Embedding(config.VOCAB, config.EMBED)
         self.wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED)
         self.drop = nn.Dropout( p =config.EMBED_DROPOUT )
@@ -136,19 +134,6 @@ class GPT2Model( nn.Module ):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         
-
-    def forward(self,x):
-
-        x_t = self.wte(x)
-        x_p = self.wpe(x)
-        x = x_t + x_p
-        x = self.drop(x)
-        for h_ in self.h:
-            x = h_(x)
-        
-        x = self.ln_f(x)
-        x = self.lm_head(x)
-        return x 
 
 
     def forward(self,idx,targets=None):
