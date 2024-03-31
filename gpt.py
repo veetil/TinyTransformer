@@ -62,7 +62,10 @@ class SelfAttentionLayer(nn.Module):
         self.attn_dropout = nn.Dropout(config.ATTN_DROPOUT )
         self.c_proj = nn.Linear( config.EMBED , config.EMBED, bias = config.bias )
         self.residual_dropout = nn.Dropout(config.RESID_DROPOUT )
-        self.register_buffer("bias", torch.tril(torch.ones(config.BLOCK_SIZE, config.BLOCK_SIZE))
+        # flash attention 
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+           self.register_buffer("bias", torch.tril(torch.ones(config.BLOCK_SIZE, config.BLOCK_SIZE))
                                         .view(1, 1, config.BLOCK_SIZE, config.BLOCK_SIZE))
 
     
@@ -74,12 +77,27 @@ class SelfAttentionLayer(nn.Module):
         k = k.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
         v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
 
-        att = q@k.transpose(-2,-1)/math.sqrt( k.size(-1) ) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) 
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att,dim=-1)
-        att = self.attn_dropout(att)
-        y  = att@v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs) 
-        y = y.transpose(1,2).contiguous().view(B,T,C) #  (B, T, C) 
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
+#            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.dropout , is_causal=True)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+
+#        att = q@k.transpose(-2,-1)/math.sqrt( k.size(-1) ) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) 
+#        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+#        att = F.softmax(att,dim=-1)
+#        att = self.attn_dropout(att)
+#        y  = att@v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs) 
+#        y = y.transpose(1,2).contiguous().view(B,T,C) #  (B, T, C) 
 
         y = self.c_proj(y)
         y = self.residual_dropout(y)
@@ -126,8 +144,6 @@ class GPT2Model( nn.Module ):
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.LAYERS))
 
-
-
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -136,8 +152,6 @@ class GPT2Model( nn.Module ):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         
-
-
     def forward(self,idx,targets=None):
         device = idx.device
         b, t = idx.size()
