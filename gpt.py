@@ -4,7 +4,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torch 
 from collections import namedtuple
-
+import inspect 
+from typing import Any, Optional, Tuple
 
 ## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
 ## Author: Vineeth Veetil 
@@ -53,6 +54,58 @@ class FeedForwardLayer(nn.Module):
         return out
 
 
+
+class FeedForwardSwiGLU(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        multiple_of: int,
+        ffn_dim_multiplier: Optional[float],
+    ):
+        super().__init__()
+        hidden_dim = int(2 * hidden_dim / 3)
+        # custom dim factor multiplier
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+#        self.w1 = ColumnParallelLinear(
+#            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+#        )
+#        self.w2 = RowParallelLinear(
+#            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
+#        )
+#        self.w3 = ColumnParallelLinear(
+#            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+#        )
+
+        ## TO DO fix initialization method 
+        ## FFNSwiGLU(x, W, V, W2) = (Swish1(xW) ⊗ xV )W2
+        self.v = nn.Linear( dim, hidden_dim, bias = False ) 
+        self.w = nn.Linear( dim, hidden_dim, bias = False ) 
+        self.w2 = nn.Linear( hidden_dim, dim, bias = False ) 
+
+
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w(x)) * self.v(x))
+
+
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
         super().__init__()
@@ -82,7 +135,7 @@ class SelfAttentionLayer(nn.Module):
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
 #            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.dropout , is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.DROPOUT , is_causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -299,3 +352,47 @@ class GPT2Model( nn.Module ):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+    
+
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(f"using fused AdamW: {use_fused}")
+
+        return optimizer
+
+
+    def estimate_mfu(self, fwdbwd_per_iter, dt):
+        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        # first estimate the number of flops we do per iteration.
+        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+        N = self.get_num_params()
+        cfg = self.config
+        L, H, Q, T = cfg.LAYERS , cfg.N_HEAD, cfg.EMBED//cfg.N_HEAD, cfg.BLOCK_SIZE
+        flops_per_token = 6*N + 12*L*H*Q*T
+        flops_per_fwdbwd = flops_per_token * T
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+        # express our flops throughput as ratio of A100 bfloat16 peak flops
+        flops_achieved = flops_per_iter * (1.0/dt) # per second
+        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        mfu = flops_achieved / flops_promised
+        return mfu
