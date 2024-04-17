@@ -9,10 +9,14 @@ def is_float(string):
         return False
 
 
+def print_config(config): 
+    for k in config._asdict():
+        print(k,config._asdict()[k])
 
-def read_config():
+
+def read_config(fname='config.txt'):
     config = {}
-    with open('config.txt') as f:
+    with open(fname) as f:
         for line in f:
             try:
                 key, value = line.strip().split('=')

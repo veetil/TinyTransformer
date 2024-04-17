@@ -53,17 +53,21 @@ class FeedForwardLayer(nn.Module):
         out = self.dropout(self.c_proj(hidden_out))
         return out
 
-
-
 class FeedForwardSwiGLU(nn.Module):
     def __init__(
         self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
+        config 
+#        dim: int,
+#        hidden_dim: int,
+#        multiple_of: int,
+#        ffn_dim_multiplier: Optional[float],
     ):
         super().__init__()
+        dim = config.EMBED
+        hidden_dim = config.EMBED * config.FF_EXP
+        ffn_dim_multiplier = None 
+        multiple_of = 1 
+
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
@@ -85,8 +89,6 @@ class FeedForwardSwiGLU(nn.Module):
         self.v = nn.Linear( dim, hidden_dim, bias = False ) 
         self.w = nn.Linear( dim, hidden_dim, bias = False ) 
         self.w2 = nn.Linear( hidden_dim, dim, bias = False ) 
-
-
 
     def forward(self, x):
         return self.w2(F.silu(self.w(x)) * self.v(x))
@@ -159,6 +161,7 @@ class SelfAttentionLayer(nn.Module):
     
  
 
+
 class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -166,7 +169,12 @@ class GPT2Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         self.attn = SelfAttentionLayer(config)
         self.ln_2 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
-        self.mlp =  FeedForwardLayer( config ) 
+        if config.SWIGLU == 1 : 
+            print("Instantiating SwiGLU")
+            self.mlp = FeedForwardSwiGLU( config )
+        else:
+            print("Instantiating regular FFN")
+            self.mlp =  FeedForwardLayer( config ) 
 
     def forward(self,x):
         x_ = self.ln_1(x)
@@ -179,7 +187,6 @@ class GPT2Model( nn.Module ):
     def __init__(self, config):
         super().__init__()
         self.config = config
-
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.VOCAB, config.EMBED),
             wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED),
@@ -187,15 +194,6 @@ class GPT2Model( nn.Module ):
             h = nn.ModuleList([GPT2Block(config) for _ in range(config.LAYERS)]),
             ln_f = nn.LayerNorm(config.EMBED, bias=config.bias),
         ))
-
-
-
-#        self.wte = nn.Embedding(config.VOCAB, config.EMBED)
-#        self.wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED)
-#        self.drop = nn.Dropout( p =config.EMBED_DROPOUT )
-#        self.h = [ GPT2Block(config) for _ in range(config.LAYERS) ]
-
- #       self.ln_f = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         self.lm_head = nn.Linear( config.EMBED, config.VOCAB, bias = False )
 
         ## initial weight-tying, but how to make sure it stays tied 
