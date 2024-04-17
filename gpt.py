@@ -84,7 +84,7 @@ class FeedForwardSwiGLU(nn.Module):
 #            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
 #        )
 
-        ## TO DO fix initialization method 
+        ## TODO fix initialization method 
         ## FFNSwiGLU(x, W, V, W2) = (Swish1(xW) ⊗ xV )W2
         self.v = nn.Linear( dim, hidden_dim, bias = False ) 
         self.w = nn.Linear( dim, hidden_dim, bias = False ) 
@@ -93,7 +93,7 @@ class FeedForwardSwiGLU(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w(x)) * self.v(x))
 
-
+#       nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -166,9 +166,22 @@ class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
+        if config.RMS_NORM == 0 : 
+            self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
+        else:
+            print("Instantiating RMSNorm 1")
+            self.ln_1 = RMSNorm(config.EMBED, eps=config.EPS)
+
         self.attn = SelfAttentionLayer(config)
-        self.ln_2 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
+
+        if config.RMS_NORM == 0 : 
+            self.ln_2 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
+        else:
+            print("Instantiating RMSNorm 2")
+            self.ln_2 = RMSNorm(config.EMBED, eps=config.EPS)
+
+
+
         if config.SWIGLU == 1 : 
             print("Instantiating SwiGLU")
             self.mlp = FeedForwardSwiGLU( config )
