@@ -6,16 +6,17 @@ Welcome to the GitHub repository of my from-scratch implementation of GPT-2. My 
 
 
 <p align="center">
-  <img src="images/val-loss-gpt2-swiglu-rmsnorm.jpg" alt="Validatoin loss GPT-2 with SwiGLU and RMS Norm" width="800">
+  <img src="images/val-loss-gpt2-swiglu-rmsnorm.jpg" alt="Validation Loss GPT-2 with SwiGLU and RMS Norm" width="800">
 </p>
 
-Here we see the validation loss for the original GPT-2 implementation vs a customized version, with SwiGLU and RMS Norm. The regular Feedforward layer with 2 linear layers is replaced with a Feed Forward Network based on SwiGLU ( https://arxiv.org/pdf/2002.05202.pdf%5C)%E5%BC%95%E5%85%A5%E7%9A%84 ). The RMS norm replaces the regular normalization layer. 
-This leads to an improvement in training. Although the inmprovement is not obvious, the validatoin loss for 50k iterations is reached with 30k iterations using the modified architecture. 
-The FFN SwiGLU parameters are adjusted so that its total parameter count approximately matches the regular FFN for a more fair comparison. 
-Caveats
-- Hyperparameter optimization is required to fully establish the differences. Here, we note the trends at a single setting of all hyperparams
-- Droput was used after the output of regular FFN, but not in SwiGLU FFN
-- Scaled initilization was used to initialize weights of the final layer of regular FFN (per GPT-2 paper), but not in SwiGLU FFN. Instead, the default mean 0 sigma 0.02 initialization was used. 
+Here is a study of the validation loss for the original GPT-2 implementation versus a modified GPT-2 with SwiGLU and RMS Norm. The regular Feed Forward Network (FFN) with 2 linear layers is replaced with an FFN-SwiGLU ([SwiGLU Paper](https://arxiv.org/pdf/2002.05202.pdf)) in each layer (total of 12 layers). Additionally, in each layer, an RMS Norm layer replaces the regular normalization layer.
+
+These changes lead to an improvement in training. Although the percentage improvement in validation loss is not very high, faster convergence is obtained. Here, the validation loss for 50k iterations is reached with 40% fewer (30k) iterations with the modified architecture. The FFN-SwiGLU parameters are adjusted so that its total parameter count approximately matches the regular FFN for a more fair comparison.
+
+### Caveats
+- Hyperparameter optimization is required to fully establish the differences. Here, we note the trends at a single setting of all hyperparameters.
+- Dropout was used after the output of regular FFN, but not in SwiGLU FFN.
+- Scaled initialization was used to initialize the weights of the final layer of the regular FFN (per GPT-2 paper), but not in SwiGLU FFN. Instead, the default mean 0 sigma 0.02 initialization was used.
 
 
 ## Features
