@@ -44,8 +44,12 @@ torchrun --standalone --nproc_per_node=8 train.py
 
 ## References
 https://arxiv.org/pdf/2002.05202.pdf
+<br>
 https://arxiv.org/abs/2204.02311
+<br>
 https://github.com/karpathy/nanoGPT
+<br>
 https://github.com/openai/gpt-2
+<br>
 https://github.com/huggingface/transformers/tree/main/src/transformers/models/gpt2
 
