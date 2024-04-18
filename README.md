@@ -30,10 +30,15 @@ First, install dependencies. Prepare data. Then launch DDP run, assunming single
 OpenWebText dataset is downloaded by default. 
 
 git clone https://github.com/veetil/gpt
+<br>
 cd gpt 
+<br>
 pip install -r requirements.txt
+<br>
 python data/prepare.py 
+<br>
 wandb login
+<br>
 torchrun --standalone --nproc_per_node=8 train.py
 
 
