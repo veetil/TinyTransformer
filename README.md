@@ -14,10 +14,10 @@ As of now, the first complete version of the GPT-2 model has been implemented an
 ## Training
 This assumes that you have a cluster of GPUs, similar to vast.ai, with CUDA, pytorch installed. 
 First, install dependencies. Prepare data. Then launch DDP run, assunming single node with 8 GPUs. 
-The data is 
+OpenWebText dataset is downloaded by default. 
 git clone https://github.com/veetil/gpt
 cd gpt 
 pip install -r requirements.txt
 python data/prepare.py 
+wandb login
 torchrun --standalone --nproc_per_node=8 train.py
-

@@ -40,6 +40,7 @@ GPT2Model(
 """
 
 
+## Reference https://arxiv.org/pdf/2204.02311.pdf
 class FeedForwardLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -88,11 +89,19 @@ class FeedForwardSwiGLU(nn.Module):
         ## FFNSwiGLU(x, W, V, W2) = (Swish1(xW) ⊗ xV )W2
         self.v = nn.Linear( dim, hidden_dim, bias = False ) 
         self.w = nn.Linear( dim, hidden_dim, bias = False ) 
-        self.w2 = nn.Linear( hidden_dim, dim, bias = False ) 
+
+##      Use the commented version ( also in forward() ) if you dont want scaled init applied to SwiGLU final layer weights
+##      self.w2     = nn.Linear( hidden_dim, dim, bias = False ) 
+        self.c_proj = nn.Linear( hidden_dim, dim, bias = False ) 
+
+        ## Add Dropout to match regular FFN implementation
+        ## self.dropout = nn.Dropout(p=config.FC_DROPOUT)
+
 
     def forward(self, x):
-        return self.w2(F.silu(self.w(x)) * self.v(x))
-
+#        return self.w2(F.silu(self.w(x)) * self.v(x))
+        return self.c_proj(F.silu(self.w(x)) * self.v(x))
+    
 #       nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -215,7 +224,13 @@ class GPT2Model( nn.Module ):
 
         self.apply(self._init_weights)
 
-        # apply special scaled init to the residual projections, per GPT-2 paper
+
+        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
+        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
+        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
+        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
+        #
+        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.LAYERS))

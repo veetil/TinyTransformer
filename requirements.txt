@@ -3,3 +3,4 @@ tiktoken
 datasets
 transformers
 torch
+wandb
