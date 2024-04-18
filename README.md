@@ -1,6 +1,6 @@
 # GPT-2 Implementation from Scratch
 
-Welcome to the GitHub repository of my from-scratch implementation of GPT-2. My goal, in addion to building  GPT-2 from the ground up, is to study the architecture, impacts of other architectures and scaling laws. The initiative serves as an educational resource for myself and others interested in understanding and experimenting with the mechanisms of GPT-2. 
+Welcome to the GitHub repository of my from-scratch implementation of GPT-2. My goal is to study the architecture, impacts of other architectures and scaling laws. The initiative serves as an educational resource for myself and others interested in understanding and experimenting with the mechanisms of GPT-2. 
 
 ## Project Status
 
@@ -28,9 +28,19 @@ These changes lead to an improvement in training. Although the percentage improv
 This assumes that you have a cluster of GPUs, similar to vast.ai, with CUDA, pytorch installed. 
 First, install dependencies. Prepare data. Then launch DDP run, assunming single node with 8 GPUs. 
 OpenWebText dataset is downloaded by default. 
+
 git clone https://github.com/veetil/gpt
 cd gpt 
 pip install -r requirements.txt
 python data/prepare.py 
 wandb login
 torchrun --standalone --nproc_per_node=8 train.py
+
+
+## References
+https://arxiv.org/pdf/2002.05202.pdf
+https://arxiv.org/abs/2204.02311
+https://github.com/karpathy/nanoGPT
+https://github.com/openai/gpt-2
+https://github.com/huggingface/transformers/tree/main/src/transformers/models/gpt2
+
