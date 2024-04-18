@@ -6,7 +6,7 @@ Welcome to the GitHub repository of my from-scratch implementation of GPT-2. My 
 
 
 <p align="center">
-  <img src="images/val-loss-gpt2-swiglu-rmsnorm.jpg" alt="Validatoin loss GPT-2 with SwiGLU and RMS Norm" width="400">
+  <img src="images/val-loss-gpt2-swiglu-rmsnorm.jpg" alt="Validatoin loss GPT-2 with SwiGLU and RMS Norm" width="800">
 </p>
 
 Here we see the validation loss for the original GPT-2 implementation vs a customized version, with SwiGLU and RMS Norm. The regular Feedforward layer with 2 linear layers is replaced with a Feed Forward Network based on SwiGLU ( https://arxiv.org/pdf/2002.05202.pdf%5C)%E5%BC%95%E5%85%A5%E7%9A%84 ). The RMS norm replaces the regular normalization layer. 
