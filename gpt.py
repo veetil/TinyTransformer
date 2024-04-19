@@ -116,6 +116,34 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    print('freqs cis shape',freqs_cis.shape)
+    print('x shape',x.shape)
+    
+    assert freqs_cis.shape == (x.shape[-2], x.shape[-1])
+    shape = [d if i == ndim-2 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+def apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
 
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
@@ -134,13 +162,19 @@ class SelfAttentionLayer(nn.Module):
                                         .view(1, 1, config.BLOCK_SIZE, config.BLOCK_SIZE))
 
     
-    def forward(self,x):
+    def forward(self,x,freqs_cis = None):
         B, T, C = x.size()
 
         q, k, v =  self.c_attn(x).split(self.config.EMBED, dim = 2 )
         q = q.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2) # B, nh, T, C//nh 
         k = k.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
         v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
+
+        if self.config.ROTARY_EMBED == 1 : 
+            print("applying rotary embedding in attention layer")
+            q,k =  apply_rotary_emb(q, k, freqs_cis=freqs_cis)
+
+#        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -174,6 +208,7 @@ class SelfAttentionLayer(nn.Module):
 class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config 
 
         if config.RMS_NORM == 0 : 
             self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
@@ -189,8 +224,6 @@ class GPT2Block(nn.Module):
             print("Instantiating RMSNorm 2")
             self.ln_2 = RMSNorm(config.EMBED, eps=config.EPS)
 
-
-
         if config.SWIGLU == 1 : 
             print("Instantiating SwiGLU")
             self.mlp = FeedForwardSwiGLU( config )
@@ -198,9 +231,13 @@ class GPT2Block(nn.Module):
             print("Instantiating regular FFN")
             self.mlp =  FeedForwardLayer( config ) 
 
-    def forward(self,x):
+    def forward(self,x,freqs_cis = None):
         x_ = self.ln_1(x)
-        x = x +  self.attn(x_)
+        if self.config.ROTARY_EMBED == 0 : 
+            x = x +  self.attn(x_)
+        else:
+            x = x +  self.attn(x_,freqs_cis)
+
         x_ = self.ln_2(x)
         x = x + self.mlp(x_) 
         return x 
@@ -209,13 +246,26 @@ class GPT2Model( nn.Module ):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.VOCAB, config.EMBED),
-            wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED),
-            drop = nn.Dropout(config.EMBED_DROPOUT),
-            h = nn.ModuleList([GPT2Block(config) for _ in range(config.LAYERS)]),
-            ln_f = nn.LayerNorm(config.EMBED, bias=config.bias),
-        ))
+
+        ## Learned positional encoding
+        if config.ROTARY_EMBED == 0 : 
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.VOCAB, config.EMBED),
+                wpe = nn.Embedding(config.MAX_POS_EMBED, config.EMBED),
+                drop = nn.Dropout(config.EMBED_DROPOUT),
+                h = nn.ModuleList([GPT2Block(config) for _ in range(config.LAYERS)]),
+                ln_f = nn.LayerNorm(config.EMBED, bias=config.bias),
+            ))
+        ## RoPE => no positional encoding at this stage , but precompute RoPE multipliers 
+        else:
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.VOCAB, config.EMBED),
+                drop = nn.Dropout(config.EMBED_DROPOUT),
+                h = nn.ModuleList([GPT2Block(config) for _ in range(config.LAYERS)]),
+                ln_f = nn.LayerNorm(config.EMBED, bias=config.bias),
+            ))
+            self.freqs_cis = precompute_freqs_cis( config.EMBED // config.N_HEAD, config.BLOCK_SIZE * 2)
+
         self.lm_head = nn.Linear( config.EMBED, config.VOCAB, bias = False )
 
         ## initial weight-tying, but how to make sure it stays tied 
@@ -246,16 +296,28 @@ class GPT2Model( nn.Module ):
     def forward(self,idx,targets=None):
         device = idx.device
         b, t = idx.size()
+
         assert t <= self.config.BLOCK_SIZE, f"Cannot forward sequence of length {t}, block size is only {self.config.BLOCK_SIZE}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         x_t = self.transformer.wte(idx)
-        x_p = self.transformer.wpe(pos)
-        x = x_t + x_p
+
+        if self.config.ROTARY_EMBED == 0 :
+            x_p = self.transformer.wpe(pos)
+            x = x_t + x_p
+        else:
+            x = x_t ## In RoPE, we rotate the query and key vectors, not input embedding directly 
+            self.freqs_cis = self.freqs_cis.to(device)
+            freqs_cis = self.freqs_cis[:self.config.BLOCK_SIZE]
+
+        ## TODO - Clean up hack approach with variables inside conditions. 
         x = self.transformer.drop(x)
         for h_ in self.transformer.h:
-            x = h_(x)
-        
+            if self.config.ROTARY_EMBED == 0 : 
+                x = h_(x)
+            else:
+                x = h_(x,freqs_cis)
+
         x = self.transformer.ln_f(x)
         if targets is not None:
             logits = self.lm_head(x)
