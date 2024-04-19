@@ -126,8 +126,8 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    print('freqs cis shape',freqs_cis.shape)
-    print('x shape',x.shape)
+#    print('freqs cis shape',freqs_cis.shape)
+#    print('x shape',x.shape)
     
     assert freqs_cis.shape == (x.shape[-2], x.shape[-1])
     shape = [d if i == ndim-2 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
@@ -171,7 +171,7 @@ class SelfAttentionLayer(nn.Module):
         v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
 
         if self.config.ROTARY_EMBED == 1 : 
-            print("applying rotary embedding in attention layer")
+#            print("applying rotary embedding in attention layer")
             q,k =  apply_rotary_emb(q, k, freqs_cis=freqs_cis)
 
 #        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
