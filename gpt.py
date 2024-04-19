@@ -399,7 +399,7 @@ class GPT2Model( nn.Module ):
 
         return model
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self, config_ = None, non_embedding=True):
         """
         Return the number of parameters in the model.
         For non-embedding count (default), the position embeddings get subtracted.
@@ -408,7 +408,8 @@ class GPT2Model( nn.Module ):
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+            if  config_ is None or config_.ROTARY_EMBED == 0 : 
+                n_params -= self.transformer.wpe.weight.numel()
         return n_params
     
 
@@ -469,11 +470,11 @@ class GPT2Model( nn.Module ):
         return optimizer
 
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
+    def estimate_mfu(self, fwdbwd_per_iter, dt,config_ = None):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params()
+        N = self.get_num_params(config_)
         cfg = self.config
         L, H, Q, T = cfg.LAYERS , cfg.N_HEAD, cfg.EMBED//cfg.N_HEAD, cfg.BLOCK_SIZE
         flops_per_token = 6*N + 12*L*H*Q*T
