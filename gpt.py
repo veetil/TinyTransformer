@@ -6,6 +6,7 @@ import torch
 from collections import namedtuple
 import inspect 
 from typing import Any, Optional, Tuple
+from typing import List
 
 ## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
 ## Author: Vineeth Veetil 
@@ -38,7 +39,6 @@ GPT2Model(
   (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
 )            
 """
-
 
 ## Reference https://arxiv.org/pdf/2204.02311.pdf
 class FeedForwardLayer(nn.Module):
@@ -74,16 +74,6 @@ class FeedForwardSwiGLU(nn.Module):
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-#        self.w1 = ColumnParallelLinear(
-#            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-#        )
-#        self.w2 = RowParallelLinear(
-#            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-#        )
-#        self.w3 = ColumnParallelLinear(
-#            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-#        )
 
         ## TODO fix initialization method 
         ## FFNSwiGLU(x, W, V, W2) = (Swish1(xW) ⊗ xV )W2
@@ -145,6 +135,35 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+class MoeLayer(nn.Module):
+    def __init__(self, experts: List[nn.Module], gate: nn.Module, config ):
+        super().__init__()
+        assert len(experts) > 0
+        self.experts = nn.ModuleList(experts)
+        self.gate = gate
+        self.config = config
+
+#    def forward(self, inputs: torch.Tensor):
+#        gate_logits = self.gate(inputs)
+#        weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
+#        weights = F.softmax(weights, dim=1, dtype=torch.float).to(inputs.dtype)
+#        results = torch.zeros_like(inputs)
+#        for i, expert in enumerate(self.experts):
+#            batch_idx, nth_expert = torch.where(selected_experts == i)
+#            results[batch_idx] += weights[batch_idx, nth_expert, None] *  expert(inputs[batch_idx])
+#        return results
+
+    def forward(self, inputs: torch.Tensor):
+        gate_logits = self.gate(inputs)
+        weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
+        weights = F.softmax(weights, dim=2, dtype=torch.float).to(inputs.dtype)
+        results = torch.zeros_like(inputs)
+        for i, expert in enumerate(self.experts):
+            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
+            results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
+            
+        return results
+    
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
         super().__init__()
@@ -224,12 +243,20 @@ class GPT2Block(nn.Module):
             print("Instantiating RMSNorm 2")
             self.ln_2 = RMSNorm(config.EMBED, eps=config.EPS)
 
-        if config.SWIGLU == 1 : 
+
+        if config.MoE == 1 : 
+            self.mlp = MoeLayer(
+                experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
+                config = config
+            )
+        elif config.SWIGLU == 1 : 
             print("Instantiating SwiGLU")
             self.mlp = FeedForwardSwiGLU( config )
         else:
             print("Instantiating regular FFN")
             self.mlp =  FeedForwardLayer( config ) 
+
 
     def forward(self,x,freqs_cis = None):
         x_ = self.ln_1(x)
@@ -412,9 +439,6 @@ class GPT2Model( nn.Module ):
                 n_params -= self.transformer.wpe.weight.numel()
         return n_params
     
-
-
-
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
@@ -441,7 +465,6 @@ class GPT2Model( nn.Module ):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
-    
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
