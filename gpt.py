@@ -182,13 +182,101 @@ class MoeLayer_ddp(nn.Module):
 
         # Compute gate outputs
         gate_logits = self.gate(inputs)
-        expert_scores, expert_indices = torch.topk(gate_logits, k=self.config.TOPK_EXPERTS, dim=-1)
-        expert_scores = F.softmax(expert_scores, dim=-1)
 
-        # Scatter input to experts
-        input_list = [inputs[expert_indices == i] for i in range(self.world_size)]
+        weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
+        weights = F.softmax(weights, dim=2, dtype=torch.float).to(inputs.dtype)
+        input_list = [] 
+
+
+        for i in range(self.config.NUM_EXPERTS):
+            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
+            input_list.append(inputs[batch_idx, token_idx])
+
+#        scattered_input = [torch.empty_like(input_list[0]) for _ in range(self.world_size)]
         scattered_input = torch.empty_like(inputs)
         dist.scatter(scattered_input, input_list, src=0)
+
+        # Compute expert output using the local expert on each device
+        expert_output = self.experts[dist.get_rank()](scattered_input)
+        gathered_outputs = [torch.empty_like(expert_output) for _ in range(self.world_size)]
+        dist.all_gather(gathered_outputs, expert_output)
+
+        results = torch.zeros_like(inputs)
+        for i, expert_output in enumerate(gathered_outputs):
+            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
+            results[batch_idx, token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert_output[batch_idx, token_idx]
+
+
+        # Move the output to    the same device as the input
+        results = results.to(input_device)
+
+        return results
+    
+        ## new paste
+
+         # Combine expert outputs using the suggested style
+"""
+        for i, expert_output in enumerate(gathered_outputs):
+            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
+            results[batch_idx, token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert_output[batch_idx, token_idx]
+
+        # Move the output to the same device as the input
+        results = results.to(input_device)
+
+
+        # Combine expert outputs
+        combined_outputs = torch.cat(gathered_outputs, dim=0)
+        combined_outputs = combined_outputs[selected_experts.view(-1), :].view_as(inputs)
+        output = torch.sum(weights.unsqueeze(-1) * combined_outputs, dim=1)
+
+        # Move the output to the same device as the input
+        output = output.to(input_device)
+
+        return output
+        ## end new paste
+
+
+
+
+        # Compute expert outputs
+        expert_outputs = []
+        for i in range(self.num_local_experts):
+            expert_index = self.world_size * i + dist.get_rank()
+            expert_output = self.experts[i](scattered_input[expert_index])
+            expert_outputs.append(expert_output)
+
+        # Gather expert outputs from all processes
+        gathered_outputs = [torch.empty_like(expert_outputs[0]) for _ in range(self.world_size)]
+        dist.all_gather(gathered_outputs, expert_outputs[0])
+
+        # Combine expert outputs
+        combined_outputs = torch.cat(gathered_outputs, dim=0)
+        combined_outputs = combined_outputs[selected_experts.view(-1), :].view_as(inputs)
+        output = torch.sum(weights.unsqueeze(-1) * combined_outputs, dim=1)
+
+        # Move the output to the same device as the input
+        output = output.to(input_device)
+
+        return output
+
+
+
+        results = torch.zeros_like(inputs)
+        for i, expert in enumerate(self.experts):
+            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
+            results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
+
+
+
+
+
+
+#        expert_scores, expert_indices = torch.topk(gate_logits, k=self.config.TOPK_EXPERTS, dim=-1)
+#        expert_scores = F.softmax(expert_scores, dim=-1)
+        # Scatter input to experts
+#        input_list = [inputs[expert_indices == i] for i in range(self.world_size)]
+#        scattered_input = torch.empty_like(inputs)
+#        dist.scatter(scattered_input, input_list, src=0)
 
         # Compute expert outputs
         expert_outputs = []
@@ -210,6 +298,9 @@ class MoeLayer_ddp(nn.Module):
         output = output.to(input_device)
 
         return output
+
+
+        """
 
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
