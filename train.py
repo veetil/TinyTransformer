@@ -299,7 +299,7 @@ else:
     model.transformer.ln_f.to(device)
     model.lm_head.to(device)
     # Wrap the model with DistributedDataParallel
-    model = DDP(model)
+    model = DDP(model, device_ids=[ddp_local_rank])
 
 # wrap model into DDP container
 #if ddp:
