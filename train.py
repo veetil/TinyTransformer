@@ -252,7 +252,9 @@ elif init_from.startswith('gpt2'):
 #if block_size < model.config.block_size:
 #    model.crop_block_size(block_size)
 #    model_args['block_size'] = block_size # so that the checkpoint will have the right value
-model.to(device)
+
+
+
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -269,9 +271,39 @@ if compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
+if config.MoE == 0 or not ddp:
+    model.to(device)
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+else:
+    # Identify the experts and send each to a different GPU
+#    num_experts = 8
+#    num_gpus = 8
+    assert config.NUM_EXPERTS == ddp_world_size, "Number of experts must match the number of GPUs"
+
+    # Create a list to store the expert devices
+    expert_devices = [torch.device(f"cuda:{i}") for i in range(ddp_world_size)]
+
+    # Assign experts to different GPUs and non-expert layers to the default device
+    for i, layer in enumerate(model.transformer.h):
+        if hasattr(layer.mlp, 'experts'):
+            for j, expert in enumerate(layer.mlp.experts):
+                expert.to(expert_devices[j % ddp_world_size])
+        else:
+            layer.to(device)
+
+    model.transformer.wte.to(device)
+    if config.ROTARY_EMBED == 0 : 
+        model.transformer.wpe.to(device)
+    model.transformer.drop.to(device)
+    model.transformer.ln_f.to(device)
+    model.lm_head.to(device)
+    # Wrap the model with DistributedDataParallel
+    model = DDP(model)
+
 # wrap model into DDP container
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+#if ddp:
+#    model = DDP(model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()

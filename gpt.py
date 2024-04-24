@@ -7,6 +7,8 @@ from collections import namedtuple
 import inspect 
 from typing import Any, Optional, Tuple
 from typing import List
+import torch.distributed as dist
+import os 
 
 ## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
 ## Author: Vineeth Veetil 
@@ -164,6 +166,51 @@ class MoeLayer(nn.Module):
             
         return results
     
+class MoeLayer_ddp(nn.Module):
+    def __init__(self, experts: List[nn.Module], gate: nn.Module, config):
+        super().__init__()
+        assert len(experts) > 0
+        self.experts = nn.ModuleList(experts)
+        self.gate = gate
+        self.config = config
+        self.world_size = dist.get_world_size()
+        self.num_local_experts = len(experts) // self.world_size
+
+    def forward(self, inputs: torch.Tensor):
+        # Get the device of the input tensor
+        input_device = inputs.device
+
+        # Compute gate outputs
+        gate_logits = self.gate(inputs)
+        expert_scores, expert_indices = torch.topk(gate_logits, k=self.config.TOPK_EXPERTS, dim=-1)
+        expert_scores = F.softmax(expert_scores, dim=-1)
+
+        # Scatter input to experts
+        input_list = [inputs[expert_indices == i] for i in range(self.world_size)]
+        scattered_input = torch.empty_like(inputs)
+        dist.scatter(scattered_input, input_list, src=0)
+
+        # Compute expert outputs
+        expert_outputs = []
+        for i in range(self.num_local_experts):
+            expert_index = self.world_size * i + dist.get_rank()
+            expert_output = self.experts[expert_index](scattered_input[expert_indices == expert_index])
+            expert_outputs.append(expert_output)
+
+        # Gather expert outputs
+        gathered_outputs = [torch.empty_like(expert_outputs[0]) for _ in range(self.world_size)]
+        dist.all_gather(gathered_outputs, expert_outputs[0])
+
+        # Combine expert outputs
+        combined_outputs = torch.cat(gathered_outputs, dim=0)
+        combined_outputs = combined_outputs[expert_indices.view(-1), :].view_as(inputs)
+        output = torch.sum(expert_scores.unsqueeze(-1) * combined_outputs, dim=1)
+
+        # Move the output to the same device as the input
+        output = output.to(input_device)
+
+        return output
+
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
         super().__init__()
@@ -243,13 +290,22 @@ class GPT2Block(nn.Module):
             print("Instantiating RMSNorm 2")
             self.ln_2 = RMSNorm(config.EMBED, eps=config.EPS)
 
+        ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+
 
         if config.MoE == 1 : 
-            self.mlp = MoeLayer(
-                experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
-                gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
-                config = config
-            )
+            if not ddp:
+                self.mlp = MoeLayer(
+                    experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                    gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
+                    config = config
+                )
+            else:
+                self.mlp = MoeLayer_ddp(
+                    experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                    gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
+                    config = config
+                )
         elif config.SWIGLU == 1 : 
             print("Instantiating SwiGLU")
             self.mlp = FeedForwardSwiGLU( config )
