@@ -9,7 +9,7 @@ from typing import Any, Optional, Tuple
 from typing import List
 import torch.distributed as dist
 import os 
-
+from torch import Tensor
 ## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
 ## Author: Vineeth Veetil 
 ## The code is based on the OpenAI GPT-2 implementation, but has been modified to be more readable and to allow for easy modification.
@@ -60,10 +60,6 @@ class FeedForwardSwiGLU(nn.Module):
     def __init__(
         self,
         config 
-#        dim: int,
-#        hidden_dim: int,
-#        multiple_of: int,
-#        ffn_dim_multiplier: Optional[float],
     ):
         super().__init__()
         dim = config.EMBED
@@ -115,7 +111,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cis: Tensor, x: Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
 #    print('freqs cis shape',freqs_cis.shape)
@@ -125,10 +121,10 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     shape = [d if i == ndim-2 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
 def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    xq: Tensor,
+    xk: Tensor,
+    freqs_cis: Tensor,
+) -> Tuple[Tensor, Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
@@ -145,17 +141,7 @@ class MoeLayer(nn.Module):
         self.gate = gate
         self.config = config
 
-#    def forward(self, inputs: torch.Tensor):
-#        gate_logits = self.gate(inputs)
-#        weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
-#        weights = F.softmax(weights, dim=1, dtype=torch.float).to(inputs.dtype)
-#        results = torch.zeros_like(inputs)
-#        for i, expert in enumerate(self.experts):
-#            batch_idx, nth_expert = torch.where(selected_experts == i)
-#            results[batch_idx] += weights[batch_idx, nth_expert, None] *  expert(inputs[batch_idx])
-#        return results
-
-    def forward(self, inputs: torch.Tensor):
+    def forward(self, inputs: Tensor):
         gate_logits = self.gate(inputs)
         weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
         weights = F.softmax(weights, dim=2, dtype=torch.float).to(inputs.dtype)
@@ -165,7 +151,77 @@ class MoeLayer(nn.Module):
             results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
             
         return results
+
+
+# Based on https://github.com/pytorch/pytorch/pull/40762
+class _AllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, input: Tensor) -> Tensor:  # type: ignore
+        ctx.group =  dist.group.WORLD
+        input = input.contiguous()
+        output = torch.empty_like(input)
+        dist.all_to_all_single(output, input, group=ctx.group)
+        return output
     
+def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
+    """Workaround for https://github.com/pytorch/pytorch/issues/55579"""
+    assert num_classes > 0, "num_classes must be a positive integer"
+    ret = torch.zeros(tensor.shape + (num_classes,), device=tensor.device, dtype=tensor.dtype)
+    ret.scatter_(-1, tensor.unsqueeze(-1), 1)
+    return ret
+
+
+def gating(logits: torch.Tensor) : 
+    # NOTE(msb) softmax requires FP32: https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/
+    gates = F.softmax(logits, dim=1, dtype=torch.float)
+
+    # gates has shape of SE
+    num_tokens = gates.shape[0]
+    num_experts = gates.shape[1]
+
+    capacity =  num_tokens 
+    assert num_tokens % num_experts == 0
+
+    # Create a mask for 1st's expert per token
+    indices1_s = torch.argmax(gates, dim=1)
+    mask1 = one_hot(indices1_s, num_classes=num_experts)
+
+    logits_except1 = logits.masked_fill(mask1.bool(), float("-inf"))
+    indices2_s = torch.argmax(logits_except1, dim=1)
+    mask2 = one_hot(indices2_s, num_classes=num_experts)
+
+    # Compute locations in capacity buffer
+    locations1 = torch.cumsum(mask1, dim=0) - 1
+    locations2 = torch.cumsum(mask2, dim=0) - 1
+    # Update 2nd's location by accounting for locations of 1st
+    locations2 += torch.sum(mask1, dim=0, keepdim=True)
+
+    # Store the capacity location for each token
+    locations1_s = torch.sum(locations1 * mask1, dim=1)
+    locations2_s = torch.sum(locations2 * mask2, dim=1)
+
+    # Normalize gate probabilities
+    gates1_s = (gates * mask1).sum(dim=1)  # einsum("se,se->s")
+    gates2_s = (gates * mask2).sum(dim=1)  # einsum("se,se->s")
+    denom_s = gates1_s + gates2_s
+    # Avoid divide-by-zero
+    denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
+    gates1_s /= denom_s
+    gates2_s /= denom_s
+
+    # Calculate combine_weights and dispatch_mask
+    gates1 = gates1_s.unsqueeze(-1) * mask1  # einsum("s,se->se")
+    gates2 = gates2_s.unsqueeze(-1) * mask2  # einsum("s,se->se")
+    locations1_sc = one_hot(locations1_s, num_classes=capacity)
+    locations2_sc = one_hot(locations2_s, num_classes=capacity)
+    combine1_sec = gates1.unsqueeze(2) * locations1_sc.unsqueeze(1)  # einsum("se,sc->sec")
+    combine2_sec = gates2.unsqueeze(2) * locations2_sc.unsqueeze(1)  # einsum("se,sc->sec")
+    combine_weights = combine1_sec + combine2_sec
+    dispatch_mask = combine_weights.bool()
+
+    return combine_weights.to(logits.dtype), dispatch_mask
+
+
 class MoeLayer_ddp(nn.Module):
     def __init__(self, experts: List[nn.Module], gate: nn.Module, config):
         super().__init__()
@@ -176,131 +232,24 @@ class MoeLayer_ddp(nn.Module):
         self.world_size = dist.get_world_size()
         self.num_local_experts = len(experts) // self.world_size
 
-    def forward(self, inputs: torch.Tensor):
-        # Get the device of the input tensor
-        input_device = inputs.device
+    def forward(self, inputs: Tensor):
 
-        # Compute gate outputs
-        gate_logits = self.gate(inputs)
+        d_model = inputs.shape[2]
+        reshaped_input = inputs.reshape(-1, d_model) # (s , m)
+        logits = self.gate(reshaped_input) # (s, e)
+        combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
+        dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
+        dispatched_input = _AllToAll.apply( dispatched_input) 
+        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model) # (g, c, m)
+        expert = self.experts[dist.get_rank()] # only local expert
+        chunk = dispatched_input # (g, c, m)
+        expert_output = expert(chunk) # (g, c, m)
+        expert_output = _AllToAll.apply(self.group, expert_output)
+        # Re-shape back: gecm -> ecm
+        expert_output = expert_output.reshape(self.world_size , -1, d_model) # (e, c, m)
+        combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
+        return combined_output.reshape(inputs.shape)
 
-        weights, selected_experts = torch.topk(gate_logits, self.config.TOPK_EXPERTS)
-        weights = F.softmax(weights, dim=2, dtype=torch.float).to(inputs.dtype)
-        input_list = [] 
-
-
-        for i in range(self.config.NUM_EXPERTS):
-            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
-            input_list.append(inputs[batch_idx, token_idx])
-
-#        scattered_input = [torch.empty_like(input_list[0]) for _ in range(self.world_size)]
-        scattered_input = torch.empty_like(inputs)
-        dist.scatter(scattered_input, input_list, src=0)
-
-        # Compute expert output using the local expert on each device
-        expert_output = self.experts[dist.get_rank()](scattered_input)
-        gathered_outputs = [torch.empty_like(expert_output) for _ in range(self.world_size)]
-        dist.all_gather(gathered_outputs, expert_output)
-
-        results = torch.zeros_like(inputs)
-        for i, expert_output in enumerate(gathered_outputs):
-            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
-            results[batch_idx, token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert_output[batch_idx, token_idx]
-
-
-        # Move the output to    the same device as the input
-        results = results.to(input_device)
-
-        return results
-    
-        ## new paste
-
-         # Combine expert outputs using the suggested style
-"""
-        for i, expert_output in enumerate(gathered_outputs):
-            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
-            results[batch_idx, token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert_output[batch_idx, token_idx]
-
-        # Move the output to the same device as the input
-        results = results.to(input_device)
-
-
-        # Combine expert outputs
-        combined_outputs = torch.cat(gathered_outputs, dim=0)
-        combined_outputs = combined_outputs[selected_experts.view(-1), :].view_as(inputs)
-        output = torch.sum(weights.unsqueeze(-1) * combined_outputs, dim=1)
-
-        # Move the output to the same device as the input
-        output = output.to(input_device)
-
-        return output
-        ## end new paste
-
-
-
-
-        # Compute expert outputs
-        expert_outputs = []
-        for i in range(self.num_local_experts):
-            expert_index = self.world_size * i + dist.get_rank()
-            expert_output = self.experts[i](scattered_input[expert_index])
-            expert_outputs.append(expert_output)
-
-        # Gather expert outputs from all processes
-        gathered_outputs = [torch.empty_like(expert_outputs[0]) for _ in range(self.world_size)]
-        dist.all_gather(gathered_outputs, expert_outputs[0])
-
-        # Combine expert outputs
-        combined_outputs = torch.cat(gathered_outputs, dim=0)
-        combined_outputs = combined_outputs[selected_experts.view(-1), :].view_as(inputs)
-        output = torch.sum(weights.unsqueeze(-1) * combined_outputs, dim=1)
-
-        # Move the output to the same device as the input
-        output = output.to(input_device)
-
-        return output
-
-
-
-        results = torch.zeros_like(inputs)
-        for i, expert in enumerate(self.experts):
-            (batch_idx, token_idx, nth_expert) = torch.where(selected_experts == i)
-            results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
-
-
-
-
-
-
-#        expert_scores, expert_indices = torch.topk(gate_logits, k=self.config.TOPK_EXPERTS, dim=-1)
-#        expert_scores = F.softmax(expert_scores, dim=-1)
-        # Scatter input to experts
-#        input_list = [inputs[expert_indices == i] for i in range(self.world_size)]
-#        scattered_input = torch.empty_like(inputs)
-#        dist.scatter(scattered_input, input_list, src=0)
-
-        # Compute expert outputs
-        expert_outputs = []
-        for i in range(self.num_local_experts):
-            expert_index = self.world_size * i + dist.get_rank()
-            expert_output = self.experts[expert_index](scattered_input[expert_indices == expert_index])
-            expert_outputs.append(expert_output)
-
-        # Gather expert outputs
-        gathered_outputs = [torch.empty_like(expert_outputs[0]) for _ in range(self.world_size)]
-        dist.all_gather(gathered_outputs, expert_outputs[0])
-
-        # Combine expert outputs
-        combined_outputs = torch.cat(gathered_outputs, dim=0)
-        combined_outputs = combined_outputs[expert_indices.view(-1), :].view_as(inputs)
-        output = torch.sum(expert_scores.unsqueeze(-1) * combined_outputs, dim=1)
-
-        # Move the output to the same device as the input
-        output = output.to(input_device)
-
-        return output
-
-
-        """
 
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
