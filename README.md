@@ -35,7 +35,7 @@ cd gpt
 <br>
 pip install -r requirements.txt
 <br>
-python data/prepare.py 
+python data/openwebtext/prepare.py 
 <br>
 wandb login
 <br>
