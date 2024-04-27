@@ -259,11 +259,37 @@ elif init_from.startswith('gpt2'):
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
-# optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
-checkpoint = None # free up memory
+
+## first send model layers to devices
+if config.MoE == 0 or not ddp:
+    model.to(device)  # Move the entire model to a single device if not using MoE or DDP
+else:
+    # Then assign experts to specific devices if using MoE
+    expert_devices = [f'cuda:{i}' for i in range(ddp_world_size)]
+    for i, layer in enumerate(model.transformer.h):
+        if hasattr(layer.mlp, 'experts'):
+            for j, expert in enumerate(layer.mlp.experts):
+                expert.to(expert_devices[j % ddp_world_size])
+
+            # Also move the gating mechanism if it's not automatically assigned
+        layer.mlp.gate.to(device)
+        layer.ln_1.to(device)
+        layer.attn.to(device)
+        layer.ln_2.to(device)
+
+    # Ensure shared layers like embeddings and output layers are also on the correct device
+    model.transformer.wte.to(device)
+    if config.ROTARY_EMBED == 0:
+        model.transformer.wpe.to(device)
+    model.transformer.drop.to(device)
+    model.transformer.ln_f.to(device)
+    model.lm_head.to(device)
+
+
+# Ensure that all parameters are on the correct device before wrapping with DDP
+for name, param in model.named_parameters():
+    assert param.device.type.startswith('cuda'), f"Parameter {name} is not on CUDA: {param.device}"
+    print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}")
 
 # compile the model
 if compile:
@@ -271,39 +297,19 @@ if compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
+## wrap model. when model sharding, dont specify device_ids parameter
 if config.MoE == 0 or not ddp:
-    model.to(device)
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
-else:
-    # Identify the experts and send each to a different GPU
-#    num_experts = 8
-#    num_gpus = 8
-    assert config.NUM_EXPERTS == ddp_world_size, "Number of experts must match the number of GPUs"
-
-    # Create a list to store the expert devices
-    expert_devices = [torch.device(f"cuda:{i}") for i in range(ddp_world_size)]
-
-    # Assign experts to different GPUs and non-expert layers to the default device
-    for i, layer in enumerate(model.transformer.h):
-        if hasattr(layer.mlp, 'experts'):
-            for j, expert in enumerate(layer.mlp.experts):
-                expert.to(expert_devices[j % ddp_world_size])
-        else:
-            layer.to(device)
-
-    model.transformer.wte.to(device)
-    if config.ROTARY_EMBED == 0 : 
-        model.transformer.wpe.to(device)
-    model.transformer.drop.to(device)
-    model.transformer.ln_f.to(device)
-    model.lm_head.to(device)
-    # Wrap the model with DistributedDataParallel
     model = DDP(model, device_ids=[ddp_local_rank])
+else:
+    model = DDP(model)
 
-# wrap model into DDP container
-#if ddp:
-#    model = DDP(model, device_ids=[ddp_local_rank])
+# optimizer
+optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+if init_from == 'resume':
+    optimizer.load_state_dict(checkpoint['optimizer'])
+checkpoint = None # free up memory
+
+ 
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
