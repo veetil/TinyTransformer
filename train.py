@@ -202,6 +202,11 @@ log_interval = 10
 # weight decay
 weight_decay = 1e-1
 
+## Assert to make sure num experts is same as world size in this limited scope implementation
+if ddp and config.MoE == 1 :
+    assert config.NUM_EXPERTS == ddp_world_size , "Number of experts must match world size"
+
+
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -265,6 +270,13 @@ if config.MoE == 0 or not ddp:
     model.to(device)  # Move the entire model to a single device if not using MoE or DDP
 else:
     # Then assign experts to specific devices if using MoE
+    # Important setting 2: iterate all expert paramter object and move them into the array of setting 1
+    model.to(device)  # Move the entire model to a single device if not using MoE or DDP
+    for name, param in model.named_parameters():
+        if hasattr(param, 'skip_allreduce'):
+            model.add_param_to_skip_allreduce(name)
+
+"""
     expert_devices = [f'cuda:{i}' for i in range(ddp_world_size)]
     for i, layer in enumerate(model.transformer.h):
         if hasattr(layer.mlp, 'experts'):
@@ -284,7 +296,7 @@ else:
     model.transformer.drop.to(device)
     model.transformer.ln_f.to(device)
     model.lm_head.to(device)
-
+"""
 
 # Ensure that all parameters are on the correct device before wrapping with DDP
 for name, param in model.named_parameters():
@@ -301,7 +313,7 @@ if compile:
 if config.MoE == 0 or not ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 else:
-    model = DDP(model)
+    model = DDP(model, device_ids=[ddp_local_rank])
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)

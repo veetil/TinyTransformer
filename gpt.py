@@ -223,14 +223,20 @@ def gating(logits: torch.Tensor) :
 
 
 class MoeLayer_ddp(nn.Module):
-    def __init__(self, experts: List[nn.Module], gate: nn.Module, config):
+    def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None):
         super().__init__()
-        assert len(experts) > 0
-        self.experts = nn.ModuleList(experts)
+        
+#        assert len(experts) > 0
+        self.experts = experts
         self.gate = gate
         self.config = config
         self.world_size = dist.get_world_size()
-        self.num_local_experts = len(experts) // self.world_size
+        self.num_local_experts = 1 #len(experts) // self.world_size
+
+        if scan_expert_func is not None:
+            for n, p in self.experts.named_parameters():
+                scan_expert_func(n, p)
+
 
     def forward(self, inputs: Tensor):
 
@@ -241,7 +247,7 @@ class MoeLayer_ddp(nn.Module):
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
         dispatched_input = _AllToAll.apply( dispatched_input) 
         dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model) # (g, c, m)
-        expert = self.experts[dist.get_rank()] # only local expert
+        expert = self.experts # [dist.get_rank()] # only local expert
         chunk = dispatched_input # (g, c, m)
         expert_output = expert(chunk) # (g, c, m)
         expert_output = _AllToAll.apply(self.group, expert_output)
@@ -249,6 +255,9 @@ class MoeLayer_ddp(nn.Module):
         expert_output = expert_output.reshape(self.world_size , -1, d_model) # (e, c, m)
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
         return combined_output.reshape(inputs.shape)
+
+
+
 
 
 class SelfAttentionLayer(nn.Module):
@@ -341,10 +350,14 @@ class GPT2Block(nn.Module):
                     config = config
                 )
             else:
+
                 self.mlp = MoeLayer_ddp(
-                    experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                    #experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                    ## TODO: Fix this hacky way of instantiating experts. This assumes one device per expert
+                    experts=FeedForwardSwiGLU(config) , 
                     gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
-                    config = config
+                    config = config,
+                    scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True)
                 )
         elif config.SWIGLU == 1 : 
             print("Instantiating SwiGLU")
@@ -452,6 +465,13 @@ class GPT2Model( nn.Module ):
             loss  = None
 
         return logits, loss 
+
+
+    # Important setting 1: skip handling expert parameters by Pytorch DDP
+    def add_param_to_skip_allreduce(self, param_name):
+        if not hasattr(self, '_ddp_params_and_buffers_to_ignore'):
+          self._ddp_params_and_buffers_to_ignore = list()
+        self._ddp_params_and_buffers_to_ignore.append(param_name)
 
 
     @classmethod
