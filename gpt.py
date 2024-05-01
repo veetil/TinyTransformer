@@ -153,16 +153,38 @@ class MoeLayer(nn.Module):
         return results
 
 
+#    @staticmethod
+#    def backward(ctx, grad_output):
+#        grad_input = torch.empty_like(grad_output)
+#        dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
+#        return grad_input, None  # None for the 'group' argument
+
+
+
 # Based on https://github.com/pytorch/pytorch/pull/40762
 class _AllToAll(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any, input: Tensor) -> Tensor:  # type: ignore
-        ctx.group =  dist.group.WORLD
+    def forward(ctx: Any, input: Tensor, group ) -> Tensor:  # type: ignore
+        ctx.group = group 
         input = input.contiguous()
         output = torch.empty_like(input)
-        dist.all_to_all_single(output, input, group=ctx.group)
+        dist.all_to_all_single(output, input, group=group)
         return output
     
+
+    @staticmethod
+    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
+        return (None, _AllToAll.apply(ctx.group, *grad_output))
+
+#    @staticmethod
+#    def backward(ctx, grad_output):
+#        # Retrieve the group from ctx
+#        group = ctx.group
+#        grad_input = torch.empty_like(grad_output)
+#        # Perform the all-to-all communication for gradients
+#        dist.all_to_all_single(grad_input, grad_output, group=group)
+#        return grad_input, None  # None corresponds to no gradient for 'group'
+
 def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
     """Workaround for https://github.com/pytorch/pytorch/issues/55579"""
     assert num_classes > 0, "num_classes must be a positive integer"
@@ -222,6 +244,8 @@ def gating(logits: torch.Tensor) :
     return combine_weights.to(logits.dtype), dispatch_mask
 
 
+
+
 class MoeLayer_ddp(nn.Module):
     def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None):
         super().__init__()
@@ -230,6 +254,8 @@ class MoeLayer_ddp(nn.Module):
         self.experts = experts
         self.gate = gate
         self.config = config
+        self.group = dist.group.WORLD  # Initialize the group for distributed communication
+
         self.world_size = dist.get_world_size()
         self.num_local_experts = 1 #len(experts) // self.world_size
 
@@ -245,12 +271,13 @@ class MoeLayer_ddp(nn.Module):
         logits = self.gate(reshaped_input) # (s, e)
         combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
-        dispatched_input = _AllToAll.apply( dispatched_input) 
+        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
+
         dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model) # (g, c, m)
         expert = self.experts # [dist.get_rank()] # only local expert
         chunk = dispatched_input # (g, c, m)
         expert_output = expert(chunk) # (g, c, m)
-        expert_output = _AllToAll.apply(self.group, expert_output)
+        expert_output = _AllToAll.apply(expert_output, self.group )
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.world_size , -1, d_model) # (e, c, m)
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)

@@ -301,7 +301,7 @@ else:
 # Ensure that all parameters are on the correct device before wrapping with DDP
 for name, param in model.named_parameters():
     assert param.device.type.startswith('cuda'), f"Parameter {name} is not on CUDA: {param.device}"
-    print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}")
+    print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}, param.skip_allreduce: {param.skip_allreduce}")
 
 # compile the model
 if compile:
