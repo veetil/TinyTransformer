@@ -34,10 +34,12 @@ def configure_optimizers(self_, weight_decay, learning_rate, betas, device_type)
 
         return optimizer
 
-
 def main():
     local_rank = int(os.environ['LOCAL_RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 
     device = 'cpu'
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -45,8 +47,6 @@ def main():
     backend = 'nccl' if torch.cuda.is_available() else 'gloo'
     if ddp : 
         dist.init_process_group(backend=backend, rank=local_rank, world_size=world_size)
-
-
 
     config_ = config.read_config()
     config.print_config(config_)
@@ -64,9 +64,6 @@ def main():
                     scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True)
                 )
 
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-
     if ddp : 
         if torch.cuda.is_available():
             device = f'cuda:{ddp_local_rank}'
@@ -80,10 +77,14 @@ def main():
     beta1 = 0.9
     beta2 = 0.95
 
-    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+
+    # Move the model and input to the device
+    mlp.to(device)
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
 
     optimizer =  configure_optimizers(mlp,weight_decay, learning_rate, (beta1, beta2), device_type)
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
     # Wrap the model with DDP based on the device
     if device_type == "cuda":
@@ -91,8 +92,6 @@ def main():
     else:
         mlp = nn.parallel.DistributedDataParallel(mlp)
 
-    # Move the model and input to the device
-    mlp.to(device)
     input1 = input1.to(device)
 
     # Forward pass
@@ -101,7 +100,6 @@ def main():
     if local_rank == 0:
         print(f"Rank {local_rank}: Output: {output}")
     print(f"Rank {local_rank}: Output: {output[0, 0, :5]}")
-
 
     # Backward pass
     for param_group in optimizer.param_groups:
