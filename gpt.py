@@ -153,15 +153,26 @@ class MoeLayer(nn.Module):
         return results
 
 
-#    @staticmethod
-#    def backward(ctx, grad_output):
-#        grad_input = torch.empty_like(grad_output)
-#        dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
-#        return grad_input, None  # None for the 'group' argument
+# Based on https://github.com/pytorch/pytorch/pull/40762
+class _AllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, input: Tensor, group) -> Tensor:  # type: ignore
+        ctx.group = group
+        input = input.contiguous()
+        output = torch.empty_like(input)
+        dist.all_to_all_single(output, input, group=group)
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: Tensor) -> Tuple[Tensor, None]:
+        grad_input = torch.empty_like(grad_output)
+        dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
+        return grad_input, None
 
 
 
 # Based on https://github.com/pytorch/pytorch/pull/40762
+"""
 class _AllToAll(torch.autograd.Function):
     @staticmethod
     def forward(ctx: Any, input: Tensor, group ) -> Tensor:  # type: ignore
@@ -174,16 +185,10 @@ class _AllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _AllToAll.apply(ctx.group, *grad_output))
+        return (None, _AllToAll.apply(*grad_output, ctx.group ))
+"""
 
-#    @staticmethod
-#    def backward(ctx, grad_output):
-#        # Retrieve the group from ctx
-#        group = ctx.group
-#        grad_input = torch.empty_like(grad_output)
-#        # Perform the all-to-all communication for gradients
-#        dist.all_to_all_single(grad_input, grad_output, group=group)
-#        return grad_input, None  # None corresponds to no gradient for 'group'
+
 
 def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
     """Workaround for https://github.com/pytorch/pytorch/issues/55579"""
@@ -247,14 +252,14 @@ def gating(logits: torch.Tensor) :
 
 
 class MoeLayer_ddp(nn.Module):
-    def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None):
+    def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
         super().__init__()
         
 #        assert len(experts) > 0
         self.experts = experts
         self.gate = gate
         self.config = config
-        self.group = dist.group.WORLD  # Initialize the group for distributed communication
+        self.group = group if group is not None else dist.group.WORLD  # Initialize the group for distributed communication
 
         self.world_size = dist.get_world_size()
         self.num_local_experts = 1 #len(experts) // self.world_size
@@ -283,6 +288,12 @@ class MoeLayer_ddp(nn.Module):
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
         return combined_output.reshape(inputs.shape)
 
+
+#def forward(self, x):
+#    # ...
+#    for chunk, expert in zip(chunked_input, self.experts):
+#        expert_output = expert(chunk) # (g, c, m)
+        # ...
 
 
 

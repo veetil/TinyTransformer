@@ -51,7 +51,7 @@ wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 1 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
 # model
 n_layer = 12
@@ -261,8 +261,6 @@ elif init_from.startswith('gpt2'):
 
 
 
-# initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 
 ## first send model layers to devices
@@ -272,48 +270,12 @@ else:
     # Then assign experts to specific devices if using MoE
     # Important setting 2: iterate all expert paramter object and move them into the array of setting 1
     model.to(device)  # Move the entire model to a single device if not using MoE or DDP
-    for name, param in model.named_parameters():
-        if hasattr(param, 'skip_allreduce'):
-            model.add_param_to_skip_allreduce(name)
+#    for name, param in model.named_parameters():
+#        if hasattr(param, 'skip_allreduce'):
+#            model.add_param_to_skip_allreduce(name)
 
-"""
-    expert_devices = [f'cuda:{i}' for i in range(ddp_world_size)]
-    for i, layer in enumerate(model.transformer.h):
-        if hasattr(layer.mlp, 'experts'):
-            for j, expert in enumerate(layer.mlp.experts):
-                expert.to(expert_devices[j % ddp_world_size])
-
-            # Also move the gating mechanism if it's not automatically assigned
-        layer.mlp.gate.to(device)
-        layer.ln_1.to(device)
-        layer.attn.to(device)
-        layer.ln_2.to(device)
-
-    # Ensure shared layers like embeddings and output layers are also on the correct device
-    model.transformer.wte.to(device)
-    if config.ROTARY_EMBED == 0:
-        model.transformer.wpe.to(device)
-    model.transformer.drop.to(device)
-    model.transformer.ln_f.to(device)
-    model.lm_head.to(device)
-"""
-
-# Ensure that all parameters are on the correct device before wrapping with DDP
-for name, param in model.named_parameters():
-    assert param.device.type.startswith('cuda'), f"Parameter {name} is not on CUDA: {param.device}"
-    print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}, param.skip_allreduce: {param.skip_allreduce}")
-
-# compile the model
-if compile:
-    print("compiling the model... (takes a ~minute)")
-    unoptimized_model = model
-    model = torch.compile(model) # requires PyTorch 2.0
-
-## wrap model. when model sharding, dont specify device_ids parameter
-if config.MoE == 0 or not ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-else:
-    model = DDP(model, device_ids=[ddp_local_rank])
+# initialize a GradScaler. If enabled=False scaler is a no-op
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -321,7 +283,31 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
- 
+# Ensure that all parameters are on the correct device before wrapping with DDP
+for name, param in model.named_parameters():
+    assert param.device.type.startswith('cuda'), f"Parameter {name} is not on CUDA: {param.device}"
+    print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}")
+
+# compile the model
+#if compile:
+#    print("compiling the model... (takes a ~minute)")
+#    unoptimized_model = model
+#    model = torch.compile(model) # requires PyTorch 2.0
+
+## wrap model. when model sharding, dont specify device_ids parameter
+if config.MoE == 0 or not ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+else:
+    model = DDP(model, device_ids=[ddp_local_rank])
+
+#x = torch.randint(0, config.VOCAB, (1, config.BLOCK_SIZE))
+#y1 = model(x)
+
+#print('device:',ddp_local_rank,'y1',y1)
+#print('device:',ddp_local_rank,'model output shape:',y1[0].shape,'y1',y1)
+
+
+
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
