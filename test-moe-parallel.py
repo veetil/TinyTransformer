@@ -39,7 +39,14 @@ def main():
     local_rank = int(os.environ['LOCAL_RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
 
-    dist.init_process_group(backend="gloo", rank=local_rank, world_size=world_size)
+    device = 'cpu'
+    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+
+    backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+    if ddp : 
+        dist.init_process_group(backend=backend, rank=local_rank, world_size=world_size)
+
+
 
     config_ = config.read_config()
     config.print_config(config_)
@@ -60,8 +67,6 @@ def main():
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
 
-    device = 'cpu'
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     if ddp : 
         if torch.cuda.is_available():
             device = f'cuda:{ddp_local_rank}'
