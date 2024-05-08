@@ -92,6 +92,7 @@ def main():
         mlp = nn.parallel.DistributedDataParallel(mlp)
 
     input1 = input1.to(device)
+    input1 = input1.contiguous()
 
     # Forward pass
     output = mlp(input1)
@@ -110,6 +111,7 @@ def main():
     num1 = logits.view(-1, logits.size(-1)).shape[0]
     print(f"num1: {num1}")
     targets = torch.randint(0, logits.size(-1), (num1,), device=device)
+    targets = targets.contiguous()
     ## initialize targets with 0 to embed
     print(f"targets: {targets}")
     loss = F.cross_entropy( logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
