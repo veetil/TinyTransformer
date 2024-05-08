@@ -115,6 +115,10 @@ def main():
     optimizer.zero_grad()
     scaler.scale(loss).backward()
 
+    ## print the grad
+    for name, param in mlp.named_parameters():
+        print(f"Rank {local_rank}: {name}, grad: {param.grad}")
+
     dist.destroy_process_group()
 
 
