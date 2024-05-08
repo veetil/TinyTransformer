@@ -50,7 +50,6 @@ def main():
 
     config_ = config.read_config()
     config.print_config(config_)
-
     torch.manual_seed(42)
 
     # Generate input tensor
