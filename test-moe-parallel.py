@@ -100,6 +100,8 @@ def main():
         print(f"Rank {local_rank}: Output: {output}")
     print(f"Rank {local_rank}: Output: {output[0, 0, :5]}")
 
+    output = output.contiguous()
+
     # Backward pass
     for param_group in optimizer.param_groups:
         param_group['lr'] = learning_rate
