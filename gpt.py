@@ -273,24 +273,21 @@ class MoeLayer_ddp(nn.Module):
     def forward(self, inputs: Tensor):
 
         d_model = inputs.shape[2]
-        reshaped_input = inputs.contiguous().reshape(-1, d_model) # (s , m)
-        reshaped_input = reshaped_input.contiguous()
+        reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
 
         logits = self.gate(reshaped_input) # (s, e)
         combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
-        dispatch_mask = dispatch_mask.contiguous()
-        combine_weights = combine_weights.contiguous()
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
         dispatched_input = _AllToAll.apply(dispatched_input, self.group)
 
-        dispatched_input = dispatched_input.contiguous().reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
+        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
         expert = self.experts # [dist.get_rank()] # only local expert
         chunk = dispatched_input # (g, c, m)
         expert_output = expert(chunk) # (g, c, m)
         expert_output = _AllToAll.apply(expert_output, self.group )
         # Re-shape back: gecm -> ecm
-        expert_output = expert_output.contiguous().reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
+        expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
 
         ## print tensor shapes in rank 0 
         if dist.get_rank() == 0 :
