@@ -43,6 +43,15 @@ GPT2Model(
 """
 
 ## Reference https://arxiv.org/pdf/2204.02311.pdf
+
+class FeedForwardEye(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = nn.Linear(config.EMBED, config.EMBED, bias=False)
+
+    def forward(self, x):
+        return self.c_fc(x)
+
 class FeedForwardLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -282,10 +291,12 @@ class MoeLayer_ddp(nn.Module):
 
         dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
-        #expert = self.experts # [dist.get_rank()] # only local expert
+        expert = self.experts # [dist.get_rank()] # only local expert
         rank = dist.get_rank()
-        expert =  torch.nn.Linear(d_model,d_model,bias=False) 
-        expert.weight = torch.nn.Parameter(torch.eye(d_model, d_model)* rank)
+#        expert =  torch.nn.Linear(d_model,d_model,bias=False)
+#        expert.weight = torch.nn.Parameter(torch.eye(d_model, d_model)* rank)
+#        expert.to(inputs.device)
+#        expert.weight = expert.weight.to(inputs.device)
 
         chunk = dispatched_input # (g, c, m)
         expert_output = expert(chunk) # (g, c, m)
@@ -423,7 +434,7 @@ class GPT2Block(nn.Module):
                 self.mlp = MoeLayer_ddp(
                     #experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
                     ## TODO: Fix this hacky way of instantiating experts. This assumes one device per expert
-                    experts=FeedForwardSwiGLU(config) , 
+                    experts=FeedForwardEye(config) , 
                     gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
                     config = config,
                     scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True)
@@ -489,6 +500,14 @@ class GPT2Model( nn.Module ):
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.LAYERS))
+
+            ## if expert then set to eye
+            if pn.endswith('mlp.experts.c_fc.weight'):
+                if config.MoE == 1 :
+                    torch.nn.init.eye_(p)
+#                else:
+ #                   torch.nn.init.normal_(p, mean=0.0, std=0.02)
+
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
