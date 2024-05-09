@@ -165,6 +165,7 @@ class _AllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, grad_output: Tensor) -> Tuple[Tensor, None]:
+        grad_output = grad_output.contiguous()
         grad_input = torch.empty_like(grad_output)
         dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
         return grad_input, None
