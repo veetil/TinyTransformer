@@ -290,7 +290,8 @@ class MoeLayer_ddp(nn.Module):
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
 
         ## print tensor shapes in rank 0 
-        if dist.get_rank() == 0 :
+
+        if False and dist.get_rank() == 0 :
             print("input shape",inputs.shape)
             print("logits shape",logits.shape)
             print("combine_weights shape",combine_weights.shape)
