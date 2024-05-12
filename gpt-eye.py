@@ -141,7 +141,6 @@ def apply_rotary_emb(
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
-
 class MoeLayer(nn.Module):
     def __init__(self, experts: List[nn.Module], gate: nn.Module, config ):
         super().__init__()
@@ -161,7 +160,6 @@ class MoeLayer(nn.Module):
             
         return results
 
-
 # Based on https://github.com/pytorch/pytorch/pull/40762
 class _AllToAll(torch.autograd.Function):
     @staticmethod
@@ -179,25 +177,7 @@ class _AllToAll(torch.autograd.Function):
         dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
         return grad_input, None
 
-
-
 # Based on https://github.com/pytorch/pytorch/pull/40762
-"""
-class _AllToAll(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx: Any, input: Tensor, group ) -> Tensor:  # type: ignore
-        ctx.group = group 
-        input = input.contiguous()
-        output = torch.empty_like(input)
-        dist.all_to_all_single(output, input, group=group)
-        return output
-    
-
-    @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _AllToAll.apply(*grad_output, ctx.group ))
-"""
-
 
 
 def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
@@ -206,7 +186,6 @@ def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
     ret = torch.zeros(tensor.shape + (num_classes,), device=tensor.device, dtype=tensor.dtype)
     ret.scatter_(-1, tensor.unsqueeze(-1).contiguous(), 1)
     return ret
-
 
 def gating(logits: torch.Tensor) : 
     # NOTE(msb) softmax requires FP32: https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/
@@ -292,52 +271,22 @@ class MoeLayer_ddp(nn.Module):
         dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
         expert = self.experts # [dist.get_rank()] # only local expert
-        rank = dist.get_rank()
-#        expert =  torch.nn.Linear(d_model,d_model,bias=False)
-#        expert.weight = torch.nn.Parameter(torch.eye(d_model, d_model)* rank)
-#        expert.to(inputs.device)
-#        expert.weight = expert.weight.to(inputs.device)
-
         chunk = dispatched_input # (g, c, m)
         expert_output = expert(chunk) # (g, c, m)
         expert_output = _AllToAll.apply(expert_output, self.group )
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
 
-        ## print tensor shapes in rank 0 
-
-        if False and dist.get_rank() == 0 :
-            print("input shape",inputs.shape)
-            print("logits shape",logits.shape)
-            print("combine_weights shape",combine_weights.shape)
-            print("dispatch_mask shape",dispatch_mask.shape)
-            print("dispatched_input shape",dispatched_input.shape)
-            print("expert_output shape",expert_output.shape)
-
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
 
-
-        diff = torch.norm(inputs - combined_output.reshape(inputs.shape))
-        print("Rank ", rank,"diff", diff)
-        expert_wts = torch.tensor([[0., 1., 2., 3.]]) # (1,e)
+        rank = dist.get_rank()
+        expert_wts = torch.tensor([[0., 1., 2., 3.]]).to(inputs.device)
         mask_wts = torch.einsum('sec, de -> s',combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        print("Rank ",rank,"mast wts",mask_wts)
-        print("Rank ",rank,"mast wts",mask_wts.shape)
         combined_output_check = torch.einsum('sm, sec, de -> sm',reshaped_input,combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        diff2 = torch.norm(combined_output - combined_output_check)
-        print("Rank ", rank,"diff2", diff2)
-
+        diff = torch.norm(combined_output - combined_output_check)
+        print("Rank ", rank,"diff", diff,'output',torch.nomr(combined_output), 'output_check',torch.norm(combined_output_check))
 
         return combined_output.reshape(inputs.shape)
-
-
-#def forward(self, x):
-#    # ...
-#    for chunk, expert in zip(chunked_input, self.experts):
-#        expert_output = expert(chunk) # (g, c, m)
-        # ...
-
-
 
 
 class SelfAttentionLayer(nn.Module):
@@ -368,9 +317,6 @@ class SelfAttentionLayer(nn.Module):
         if self.config.ROTARY_EMBED == 1 : 
 #            print("applying rotary embedding in attention layer")
             q,k =  apply_rotary_emb(q, k, freqs_cis=freqs_cis)
-
-#        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
@@ -384,22 +330,10 @@ class SelfAttentionLayer(nn.Module):
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
-
-#        att = q@k.transpose(-2,-1)/math.sqrt( k.size(-1) ) # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) 
-#        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-#        att = F.softmax(att,dim=-1)
-#        att = self.attn_dropout(att)
-#        y  = att@v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs) 
-#        y = y.transpose(1,2).contiguous().view(B,T,C) #  (B, T, C) 
-
         y = self.c_proj(y)
         y = self.resid_dropout(y)
         return y 
     
- 
-
-
 class GPT2Block(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -490,7 +424,6 @@ class GPT2Model( nn.Module ):
 
         self.apply(self._init_weights)
 
-
         # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
         #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
         #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
@@ -502,12 +435,9 @@ class GPT2Model( nn.Module ):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.LAYERS))
 
             ## if expert then set to eye
-            if pn.endswith('mlp.experts.c_fc.weight'):
-                if config.MoE == 1 :
-                    torch.nn.init.eye_(p)
-#                else:
- #                   torch.nn.init.normal_(p, mean=0.0, std=0.02)
-
+#            if pn.endswith('mlp.experts.c_fc.weight'):
+#                if config.MoE == 1 :
+#                    torch.nn.init.eye_(p)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

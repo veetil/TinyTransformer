@@ -289,16 +289,6 @@ class MoeLayer_ddp(nn.Module):
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
 
-        ## print tensor shapes in rank 0 
-
-        if False and dist.get_rank() == 0 :
-            print("input shape",inputs.shape)
-            print("logits shape",logits.shape)
-            print("combine_weights shape",combine_weights.shape)
-            print("dispatch_mask shape",dispatch_mask.shape)
-            print("dispatched_input shape",dispatched_input.shape)
-            print("expert_output shape",expert_output.shape)
-
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
         return combined_output.reshape(inputs.shape)
 
