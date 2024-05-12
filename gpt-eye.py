@@ -238,13 +238,10 @@ def gating(logits: torch.Tensor) :
     return combine_weights.to(logits.dtype), dispatch_mask
 
 
-
-
 class MoeLayer_ddp(nn.Module):
     def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
         super().__init__()
         
-#        assert len(experts) > 0
         self.experts = experts
         self.gate = gate
         self.config = config
@@ -258,8 +255,11 @@ class MoeLayer_ddp(nn.Module):
                 scan_expert_func(n, p)
 
 
-    def forward(self, inputs: Tensor):
-
+    def forward(self, inputs: Tensor, output):
+        DEBUG_= False
+        
+        if DEBUG_:
+            print(inputs.shape)
         d_model = inputs.shape[2]
         reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
 
@@ -276,17 +276,22 @@ class MoeLayer_ddp(nn.Module):
         expert_output = _AllToAll.apply(expert_output, self.group )
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
-
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
 
-        rank = dist.get_rank()
-        expert_wts = torch.tensor([[0., 1., 2., 3.]]).to(inputs.device)
-        mask_wts = torch.einsum('sec, de -> s',combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        combined_output_check = torch.einsum('sm, sec, de -> sm',reshaped_input,combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        diff = torch.norm(combined_output - combined_output_check)
-        print("Rank ", rank,"diff", diff,'output',torch.nomr(combined_output), 'output_check',torch.norm(combined_output_check))
+        if DEBUG_:
+            rank = dist.get_rank()
+            expert_wts = torch.tensor([[0., 1., 2., 3., 4., 5., 6., 7.]]).to(inputs.device)
+            print('combine wts',combine_weights.shape,'expert_wts',expert_wts.shape)
+            mask_wts = torch.einsum('sec, de -> s',combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
+            combined_output_check = torch.einsum('sm, sec, de -> sm',reshaped_input,combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
+            diff = torch.norm(combined_output - combined_output_check)
+            print("Rank ", rank,"diff", diff,'output',torch.norm(combined_output), 'output_check',torch.norm(combined_output_check))
 
-        return combined_output.reshape(inputs.shape)
+        logits = combined_output.reshape(inputs.shape)
+        loss = torch.norm(logits-output)
+
+        return logits, loss 
+
 
 
 class SelfAttentionLayer(nn.Module):
@@ -366,9 +371,9 @@ class GPT2Block(nn.Module):
             else:
 
                 self.mlp = MoeLayer_ddp(
-                    #experts=[FeedForwardSwiGLU(config) for _ in range(config.NUM_EXPERTS)],
+                    experts=FeedForwardSwiGLU(config) , 
                     ## TODO: Fix this hacky way of instantiating experts. This assumes one device per expert
-                    experts=FeedForwardEye(config) , 
+#                    experts=FeedForwardEye(config) , 
                     gate=nn.Linear(config.EMBED, config.NUM_EXPERTS, bias=False),
                     config = config,
                     scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True)

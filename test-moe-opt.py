@@ -10,8 +10,9 @@ import inspect
 from torch.nn import functional as F
 from contextlib import nullcontext
 from torch.distributed import init_process_group, destroy_process_group
+import random 
 
-DEBUG = True
+DEBUG = False
 SKIP_GRAD_ALLREDUCE_EXPERTS = True
 
 def configure_optimizers(self_, weight_decay, learning_rate, betas, device_type):
@@ -46,10 +47,8 @@ def add_param_to_skip_allreduce(model, param_name):
     model._ddp_params_and_buffers_to_ignore.append(param_name)
 
 def main():
-    local_rank = int(os.environ['LOCAL_RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 
     device = 'cpu'
@@ -57,7 +56,7 @@ def main():
 
     backend = 'nccl' if torch.cuda.is_available() else 'gloo'
     if ddp : 
-        dist.init_process_group(backend=backend, rank=local_rank, world_size=world_size)
+        dist.init_process_group(backend=backend, rank=ddp_local_rank, world_size=world_size)
 
     config_ = config.read_config()
     config.print_config(config_)
@@ -65,6 +64,7 @@ def main():
 
     # Generate input tensor
     input1 = torch.rand(8, config_.BLOCK_SIZE, config_.EMBED)
+    output1 = torch.rand(8, config_.BLOCK_SIZE, config_.EMBED)
     
     # Create the model
     mlp = MoeLayer_ddp(
@@ -79,9 +79,7 @@ def main():
             device = f'cuda:{ddp_local_rank}'
             torch.cuda.set_device(device)
 
-
     device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
-
     weight_decay = 1e-1
     learning_rate = 6e-4 # max learning rate
     weight_decay = 1e-1
@@ -96,10 +94,10 @@ def main():
                 add_param_to_skip_allreduce(mlp,name)
 
     if torch.cuda.is_available():
-        new_val = local_rank*1.0*torch.eye(config_.EMBED, config_.EMBED)
+        new_val = ddp_local_rank*1.0*torch.eye(config_.EMBED, config_.EMBED)
         mlp.experts.c_fc.weight.data = new_val.to(device)
 
-        print("local rank",local_rank,"wt",mlp.experts.c_fc.weight[0][0])
+        print("local rank",ddp_local_rank,"wt",mlp.experts.c_fc.weight[0][0])
 
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -107,31 +105,34 @@ def main():
 
     # Wrap the model with DDP based on the device
     if device_type == "cuda":
-        mlp = nn.parallel.DistributedDataParallel(mlp, device_ids=[local_rank])
+        mlp = nn.parallel.DistributedDataParallel(mlp, device_ids=[ddp_local_rank])
     else:
         mlp = nn.parallel.DistributedDataParallel(mlp)
 
     # Modify expert weights after DDP wrap
     if DEBUG : 
         if torch.cuda.is_available():
-            new_val = local_rank * 1.0 * torch.eye(config_.EMBED, config_.EMBED)
+            new_val = ddp_local_rank * 1.0 * torch.eye(config_.EMBED, config_.EMBED)
             mlp.module.experts.c_fc.weight.data = new_val.to(device)
-        
+
+    print('input1',input1.shape,'output1',output1.shape)
     input1 = input1.to(device)
-    output = mlp(input1)
+    output1 = output1.to(device)
+    print("calling mlp input1")
+    output, loss = mlp(input1,output1)
 
     # Backward pass
     for param_group in optimizer.param_groups:
         param_group['lr'] = learning_rate
 
-    logits = output
-    num1 = logits.view(-1, logits.size(-1)).shape[0]
-    print(f"num1: {num1}")
-    targets = torch.randint(0, logits.size(-1), (num1,), device=device)
-    targets = targets.contiguous()
+#    logits = output
+#    num1 = logits.view(-1, logits.size(-1)).shape[0]
+#    print(f"num1: {num1}")
+#    targets = torch.randint(0, logits.size(-1), (num1,), device=device)
+#    targets = targets.contiguous()
     ## initialize targets with 0 to embed
-    print(f"targets: {targets}")
-    loss = F.cross_entropy( logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+#    print(f"targets: {targets}")
+#    loss = F.cross_entropy( logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
     optimizer.zero_grad()
     scaler.scale(loss).backward()
@@ -154,32 +155,35 @@ def main():
     # training loop
     local_iter_num = 0 # number of iterations in the lifetime of this process
 #    raw_model = model.module if ddp else model # unwrap DDP container if needed
-    lr = 1e-4 
+    lr = 2e-5 
     grad_clip = 1.0
-    max_iters = 1000
+    max_iters = 100000
+    max_iters_check = 1000
 
     # define big random x,y and supply in each iteratio
     iter_num = 0
+    
     X_set = torch.rand(10000, config_.BLOCK_SIZE, config_.EMBED)
     #Y_set is element wise cube
-    Y_set = torch.pow(X_set, 3)
-    X, Y = X_set[iter_num % X_set.size(0)], Y_set[iter_num % Y_set.size(0)]
+    Y_set = torch.pow(X_set, 1.5)
+    X, Y = X_set[iter_num % X_set.size(0):iter_num % X_set.size(0) + 10],  Y_set[iter_num % Y_set.size(0):iter_num % Y_set.size(0) + 10]
 
 
     while True:
 
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-
-        # in DDP training we only need to sync gradients at the last micro step.
-        # the official way to do this is with model.no_sync() context manager, but
-        # I really dislike that this bloats the code and forces us to repeat code
-        # looking at the source of that context manager, it just toggles this variable
         mlp.require_backward_grad_sync = True
         with ctx:
+            X = X.to(device)
+            Y = Y.to(device)
+
             logits, loss = mlp(X, Y)
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = X_set[(iter_num+1) % X_set.size(0)], Y_set[(iter_num+1) % Y_set.size(0)]
+
+        X, Y = X_set[iter_num % X_set.size(0):iter_num % X_set.size(0) + 10],  Y_set[iter_num % Y_set.size(0):iter_num % Y_set.size(0) + 10]
+        X = X.to(device)
+        Y = Y.to(device)
+
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
         # clip the gradient
@@ -192,14 +196,70 @@ def main():
         # flush the gradients as soon as we can, no need for this memory anymore
         optimizer.zero_grad(set_to_none=True)
 
-        iter_num += 1
+        iter_num += 10
 
-        if iter_num % 10 == 0:
-            print(f"Rank {local_rank}, iter {iter_num}, loss {loss.item()}")
+        if ddp_local_rank == 0 : 
+            if iter_num % 10 == 0:
+                print(f"Rank {ddp_local_rank}, iter {iter_num}, loss {loss.item()}")
             
         # termination conditions
         if iter_num > max_iters:
             break
+
+
+        ## check that non expert params across all ranks are same, but expert params are different
+        ## get sum of squares of all non expert params
+        
+        if iter_num % max_iters_check == 0:
+            sum_non_expert_params = 0.
+            sum_expert_params = 0.
+
+            for name, param in mlp.named_parameters():
+                if not hasattr(param, 'skip_allreduce'):
+                    sum_non_expert_params += torch.sum(param*param).item()
+                    print(f"NON-EXP Rank {ddp_local_rank}, {name}, {param[0][0]}")
+                else:
+                    sum_expert_params += torch.sum(param*param).item()
+                    print(f"EXPERT Rank {ddp_local_rank}, {name}, {param[0][0]}")
+            print(f"Rank {ddp_local_rank}, sum_non_expert_params: {sum_non_expert_params}")
+            print(f"Rank {ddp_local_rank}, sum_expert_params: {sum_expert_params}")
+
+        ## gather all the expert weights from all ranks
+
+        if iter_num % max_iters_check == 0:
+            all_expert_weights = []
+            for name, param in mlp.named_parameters():
+                if not hasattr(param, 'skip_allreduce'):
+                    all_expert_weights.append(param)
+            all_expert_weights = torch.stack(all_expert_weights)
+            all_expert_weights = all_expert_weights.cpu().detach().numpy()
+            print(f"Rank {ddp_local_rank}, all_expert_weights: {all_expert_weights}")
+            ## write this to a file
+            with open(f"all_expert_weights_rank{ddp_local_rank}.txt", "w") as f:
+                for i in range(all_expert_weights.shape[0]):
+                    f.write(f"{all_expert_weights[i]}\n")
+        
+        ## eval model on sample random input and check if correct
+        if iter_num % max_iters_check == 0 and ddp_local_rank == 2 : 
+            X = torch.rand(1, config_.BLOCK_SIZE, config_.EMBED)
+            Y = torch.pow(X, 1.5)
+            X = X.to(device)
+            Y = Y.to(device)
+            logits, loss = mlp(X, Y)
+            print(f"Rank {ddp_local_rank}, eval loss: {loss.item()}")
+            print(f"Rank {ddp_local_rank}, eval logits: {logits[0][0]}")
+            print(f"Rank {ddp_local_rank}, eval Y: {Y[0][0]}")
+            ## for 10 random embeds in X abve, check if Y is correct
+            for i in range(10):
+                sample = random.randint(0, config_.BLOCK_SIZE-1)
+                x  = X[0][sample]
+                y = Y[0][sample]
+                err = logits[0][sample] - y
+                print(f"Rank {ddp_local_rank}, y is {y}, logits is {logits[0][sample]}, err is {err}, % error is {err/y*100}")
+
+
+
+
 
     destroy_process_group()
 
