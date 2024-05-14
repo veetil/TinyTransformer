@@ -240,7 +240,8 @@ def gating(logits: torch.Tensor) :
 class SimpleFFN(nn.Module):
     def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
         super().__init__()
-        
+        DEBUG = True 
+
         self.experts = experts 
         self.gate = gate
         self.config = config
@@ -252,6 +253,10 @@ class SimpleFFN(nn.Module):
         if scan_expert_func is not None:
             for n, p in self.experts.named_parameters():
                 scan_expert_func(n, p)
+
+        if DEBUG:
+            print(f"Rank {dist.get_rank()} - Initialized SimpleFFN with world_size: {self.world_size}, group: {self.group}")
+
 
 
     def forward(self, inputs: Tensor, output):
@@ -265,13 +270,13 @@ class SimpleFFN(nn.Module):
 
         # Debugging information
         if DEBUG:
-            print(f"Before einsum: reshaped_input shape {reshaped_input.shape}, dispatch_mask shape {dispatch_mask.shape}")
+            print(f"Rank {dist.get_rank()} - Before einsum: reshaped_input shape {reshaped_input.shape}, dispatch_mask shape {dispatch_mask.shape}")
 
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
 
         # Debugging information
         if DEBUG:
-            print(f"Before _AllToAll: dispatched_input shape {dispatched_input.shape}")
+            print(f"Rank {dist.get_rank()} - Before _AllToAll: dispatched_input shape {dispatched_input.shape}")
 
         # Ensure synchronization before and after all-to-all communication
         dist.barrier()
@@ -280,20 +285,34 @@ class SimpleFFN(nn.Module):
 
         # Debugging information
         if DEBUG:
-            print(f"After _AllToAll: dispatched_input shape {dispatched_input.shape}")
+            print(f"Rank {dist.get_rank()} - After _AllToAll: dispatched_input shape {dispatched_input.shape}")
+
 
         dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()  # (g, c, m)
 
         # Debugging information
         if DEBUG:
-            print(f"After reshape: dispatched_input shape {dispatched_input.shape}")
+            print(f"Rank {dist.get_rank()} - After reshape: dispatched_input shape {dispatched_input.shape}")
 
 
         combined_output = self.experts(inputs) # (g, c, m)
         logits_res = combined_output.reshape(inputs.shape)
         loss = torch.norm(logits_res-output)
 
+        if DEBUG:
+            print(f"Rank {dist.get_rank()} - After forward pass: logits_res shape {logits_res.shape}, loss {loss.item()}")
+
+
         return logits_res, loss 
+
+
+
+
+
+
+
+
+
 
 
 class MoeLayer_ddp(nn.Module):
