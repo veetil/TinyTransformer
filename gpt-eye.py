@@ -280,6 +280,13 @@ class SimpleFFN(nn.Module):
 
         # Ensure synchronization before and after all-to-all communication
         dist.barrier()
+
+        for i in range(self.world_size):
+            print(f"Rank {dist.get_rank()} before all to all, dispatched_input {i} {dispatched_input[i]}")
+            print(f"Rank {dist.get_rank()} before all to all, dispatched_input {i} shape {dispatched_input[i].shape}")
+
+        
+
         dispatched_input = _AllToAll.apply(dispatched_input, self.group)
         dist.barrier()
 
