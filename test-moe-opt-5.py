@@ -244,41 +244,6 @@ def main():
         if iter_num > max_iters:
             break
 
-
-        ## check that non expert params across all ranks are same, but expert params are different
-        ## get sum of squares of all non expert params
-        tmp = """        
-
-        
-        if iter_num % max_iters_check == 0:
-            sum_non_expert_params = 0.
-            sum_expert_params = 0.
-
-            for name, param in model.module.mlp.named_parameters():
-                if not hasattr(param, 'skip_allreduce'):
-                    sum_non_expert_params += torch.sum(param*param).item()
-                    print(f"NON-EXP Rank {ddp_local_rank}, {name}, {param[0][0]}")
-                else:
-                    sum_expert_params += torch.sum(param*param).item()
-                    print(f"EXPERT Rank {ddp_local_rank}, {name}, {param[0][0]}")
-            print(f"Rank {ddp_local_rank}, sum_non_expert_params: {sum_non_expert_params}")
-            print(f"Rank {ddp_local_rank}, sum_expert_params: {sum_expert_params}")
-
-        ## gather all the expert weights from all ranks
-
-        if iter_num % max_iters_check == 0:
-            all_expert_weights = []
-            for name, param in model.module.mlp.named_parameters():
-                if not hasattr(param, 'skip_allreduce'):
-                    all_expert_weights.append(param)
-            all_expert_weights = torch.stack(all_expert_weights)
-            all_expert_weights = all_expert_weights.cpu().detach().numpy()
-            print(f"Rank {ddp_local_rank}, all_expert_weights: {all_expert_weights}")
-            ## write this to a file
-            with open(f"all_expert_weights_rank{ddp_local_rank}.txt", "w") as f:
-                for i in range(all_expert_weights.shape[0]):
-                    f.write(f"{all_expert_weights[i]}\n")
-"""        
         ## eval model on sample random input and check if correct
         if iter_num % max_iters_check == 0  : 
             dist.barrier()
@@ -296,9 +261,6 @@ def main():
                 print("Before eval")
                 for name, param in model.named_parameters():
                     print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
-            
-
-
 
             if ddp_local_rank == 0 : 
                 model.eval()
