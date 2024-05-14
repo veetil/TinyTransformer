@@ -242,6 +242,13 @@ class SimpleFFN(nn.Module):
         super().__init__()
         
         self.experts = experts 
+        self.gate = gate
+        self.config = config
+        self.group = group if group is not None else dist.group.WORLD  # Initialize the group for distributed communication
+
+        self.world_size = dist.get_world_size()
+        self.num_local_experts = 1 #len(experts) // self.world_size
+
         if scan_expert_func is not None:
             for n, p in self.experts.named_parameters():
                 scan_expert_func(n, p)
@@ -249,11 +256,16 @@ class SimpleFFN(nn.Module):
 
     def forward(self, inputs: Tensor, output):
 
-        combined_output = self.experts(inputs) # (g, c, m)
-        logits = combined_output.reshape(inputs.shape)
-        loss = torch.norm(logits-output)
+        d_model = inputs.shape[2]
+        reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
+        logits = self.gate(reshaped_input) # (s, e)
 
-        return logits, loss 
+
+        combined_output = self.experts(inputs) # (g, c, m)
+        logits_res = combined_output.reshape(inputs.shape)
+        loss = torch.norm(logits_res-output)
+
+        return logits_res, loss 
 
 
 
