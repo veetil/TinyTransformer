@@ -237,6 +237,25 @@ def gating(logits: torch.Tensor) :
 
     return combine_weights.to(logits.dtype), dispatch_mask
 
+class SimpleFFN(nn.Module):
+    def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
+        super().__init__()
+        
+        self.experts = nn.Linear(config.EMBED, config.EMBED, bias=False)
+        if scan_expert_func is not None:
+            for n, p in self.experts.named_parameters():
+                scan_expert_func(n, p)
+
+
+    def forward(self, inputs: Tensor, output):
+
+        combined_output = self.experts(inputs) # (g, c, m)
+        logits = combined_output.reshape(inputs.shape)
+        loss = torch.norm(logits-output)
+
+        return logits, loss 
+
+
 
 class MoeLayer_ddp(nn.Module):
     def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):

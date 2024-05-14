@@ -4,6 +4,8 @@ import config
 from gpt import FeedForwardEye
 from gpt import FeedForwardSwiGLU
 from gpt import MoeLayer_ddp
+from gpt import SimpleFFN
+
 import torch.distributed as dist
 import os 
 import inspect 
@@ -77,7 +79,9 @@ def main():
             self.mlp0  = FeedForwardSwiGLU(config_)
             self.relu = nn.ReLU()
 
-            self.mlp = MoeLayer_ddp(
+#            self.mlp = MoeLayer_ddp(
+            self.mlp = SimpleFFN(
+
 #                    experts=FeedForwardEye(config_) , 
                     experts = FeedForwardSwiGLU(config_),
                     gate=nn.Linear(config_.EMBED, config_.NUM_EXPERTS, bias=False),
