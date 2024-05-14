@@ -261,9 +261,8 @@ class SimpleFFN(nn.Module):
         logits = self.gate(reshaped_input) # (s, e)
         combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
-        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
-
-        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
+#        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
+#        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
 
 
