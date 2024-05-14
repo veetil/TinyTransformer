@@ -241,7 +241,7 @@ class SimpleFFN(nn.Module):
     def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
         super().__init__()
         
-        self.experts = nn.Linear(config.EMBED, config.EMBED, bias=False)
+        self.experts = experts 
         if scan_expert_func is not None:
             for n, p in self.experts.named_parameters():
                 scan_expert_func(n, p)
@@ -297,6 +297,53 @@ class MoeLayer_ddp(nn.Module):
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
 
+
+        logits = combined_output.reshape(inputs.shape)
+        loss = torch.norm(logits-output)
+
+        return logits, loss 
+
+
+class MoeLayer_ddp_debug(nn.Module):
+    def __init__(self, experts: nn.Module, gate: nn.Module, config, scan_expert_func=None, group: Optional[Any] = None):
+        super().__init__()
+        
+        self.experts = experts
+        self.gate = gate
+        self.config = config
+        self.group = group if group is not None else dist.group.WORLD  # Initialize the group for distributed communication
+
+        self.world_size = dist.get_world_size()
+        self.num_local_experts = 1 #len(experts) // self.world_size
+
+        if scan_expert_func is not None:
+            for n, p in self.experts.named_parameters():
+                scan_expert_func(n, p)
+
+
+    def forward(self, inputs: Tensor, output):
+        DEBUG_= False
+        
+        if DEBUG_:
+            print(inputs.shape)
+        d_model = inputs.shape[2]
+        reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
+
+        logits = self.gate(reshaped_input) # (s, e)
+        combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
+        dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
+        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
+
+        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
+
+        expert = self.experts # [dist.get_rank()] # only local expert
+        chunk = dispatched_input # (g, c, m)
+        expert_output = expert(chunk) # (g, c, m)
+        expert_output = _AllToAll.apply(expert_output, self.group )
+        # Re-shape back: gecm -> ecm
+        expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
+        combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
+
         if DEBUG_:
             rank = dist.get_rank()
             expert_wts = torch.tensor([[0., 1., 2., 3., 4., 5., 6., 7.]]).to(inputs.device)
@@ -310,7 +357,6 @@ class MoeLayer_ddp(nn.Module):
         loss = torch.norm(logits-output)
 
         return logits, loss 
-
 
 
 class SelfAttentionLayer(nn.Module):
