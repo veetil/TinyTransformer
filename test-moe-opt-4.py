@@ -278,6 +278,23 @@ def main():
         ## eval model on sample random input and check if correct
         if iter_num % max_iters_check == 0  : 
             dist.barrier()
+            ## print state of model before eval and write to file
+            file_name = f"model_state_before_eval_rank{ddp_local_rank}.txt"
+            if ddp_local_rank == 0 : 
+                print("Before eval")
+                for name, param in model.named_parameters():
+                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
+                with open(file_name, "w") as f:
+                    for name, param in model.named_parameters():
+                        f.write(f"Rank {ddp_local_rank}, {name}, {param[0][0]}\n")
+
+            elif ddp_local_rank == 2 :
+                print("Before eval")
+                for name, param in model.named_parameters():
+                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
+            
+
+
 
             if ddp_local_rank == 0 : 
                 model.eval()
@@ -301,6 +318,26 @@ def main():
                     y = Y[0][sample]
                     err = torch.norm(logits[0][sample] - y)
                     print(f"Rank {ddp_local_rank}, y is {torch.norm(y)}, logits is {torch.norm(logits[0][sample])}, err is {err}, % error is {err/torch.norm(y)*100}")
+
+
+
+            ## print state of model after eval
+            if ddp_local_rank == 0 : 
+                print("Post eval")
+                file_name = f"model_state_after_eval_rank{ddp_local_rank}.txt"
+
+                for name, param in model.named_parameters():
+                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
+                with open(file_name, "w") as f:
+                    for name, param in model.named_parameters():
+                        f.write(f"Rank {ddp_local_rank}, {name}, {param[0][0]}\n")
+            elif ddp_local_rank == 2 :
+                print("Post eval")
+                for name, param in model.named_parameters():
+                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
+
+
+        
 
     dist.barrier()
 
