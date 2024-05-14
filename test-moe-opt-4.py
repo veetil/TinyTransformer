@@ -334,7 +334,8 @@ def main():
             elif ddp_local_rank == 2 :
                 print("Post eval")
                 for name, param in model.named_parameters():
-                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}")
+                    print(f"Rank {ddp_local_rank}, {name}, {param[0][0]}") 
+                    
 
 
         
