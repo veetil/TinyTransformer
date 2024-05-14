@@ -255,15 +255,37 @@ class SimpleFFN(nn.Module):
 
 
     def forward(self, inputs: Tensor, output):
+        DEBUG = True 
 
         d_model = inputs.shape[2]
         reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
         logits = self.gate(reshaped_input) # (s, e)
         combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
-        dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
 #        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
 #        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
+
+        # Debugging information
+        if DEBUG:
+            print(f"Before einsum: reshaped_input shape {reshaped_input.shape}, dispatch_mask shape {dispatch_mask.shape}")
+
+        dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
+
+        # Debugging information
+        if DEBUG:
+            print(f"Before _AllToAll: dispatched_input shape {dispatched_input.shape}")
+
+        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
+
+        # Debugging information
+        if DEBUG:
+            print(f"After _AllToAll: dispatched_input shape {dispatched_input.shape}")
+
+        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()  # (g, c, m)
+
+        # Debugging information
+        if DEBUG:
+            print(f"After reshape: dispatched_input shape {dispatched_input.shape}")
 
 
         combined_output = self.experts(inputs) # (g, c, m)
