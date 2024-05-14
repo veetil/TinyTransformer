@@ -261,8 +261,6 @@ class SimpleFFN(nn.Module):
         reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
         logits = self.gate(reshaped_input) # (s, e)
         combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
-#        dispatched_input = _AllToAll.apply(dispatched_input, self.group)
-#        dispatched_input = dispatched_input.reshape(self.world_size, -1, d_model).contiguous()   # (g, c, m)
 
 
         # Debugging information
@@ -275,7 +273,10 @@ class SimpleFFN(nn.Module):
         if DEBUG:
             print(f"Before _AllToAll: dispatched_input shape {dispatched_input.shape}")
 
+        # Ensure synchronization before and after all-to-all communication
+        dist.barrier()
         dispatched_input = _AllToAll.apply(dispatched_input, self.group)
+        dist.barrier()
 
         # Debugging information
         if DEBUG:
@@ -293,7 +294,6 @@ class SimpleFFN(nn.Module):
         loss = torch.norm(logits_res-output)
 
         return logits_res, loss 
-
 
 
 class MoeLayer_ddp(nn.Module):
