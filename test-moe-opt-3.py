@@ -74,20 +74,16 @@ def main():
 
         def __init__(self):
             super(MoEWrapModel, self).__init__()
-
-            
             self.mlp0  = FeedForwardSwiGLU(config_)
             self.relu = nn.ReLU()
 
-            mlp = MoeLayer_ddp(
+            self.mlp = MoeLayer_ddp(
 #                    experts=FeedForwardEye(config_) , 
                     experts = FeedForwardSwiGLU(config_),
                     gate=nn.Linear(config_.EMBED, config_.NUM_EXPERTS, bias=False),
                     config = config_,
                     scan_expert_func = lambda name, param: setattr(param, 'skip_allreduce', True)
                 )
-
-            self.mlp = mlp
 
 
         def forward(self, x, y):
@@ -114,7 +110,7 @@ def main():
     if  SKIP_GRAD_ALLREDUCE_EXPERTS : 
         for name, param in model.named_parameters():
             if hasattr(param, 'skip_allreduce'):
-                add_param_to_skip_allreduce(model,name)
+                model.add_param_to_skip_allreduce(name)
 
 #    if torch.cuda.is_available():
 #        new_val = ddp_local_rank*1.0*torch.eye(config_.EMBED, config_.EMBED)
@@ -135,7 +131,7 @@ def main():
     if DEBUG : 
         if torch.cuda.is_available():
             new_val = ddp_local_rank * 1.0 * torch.eye(config_.EMBED, config_.EMBED)
-            model.module.mlp.module.experts.c_fc.weight.data = new_val.to(device)
+            model.module.mlp.experts.c_fc.weight.data = new_val.to(device)
 
     print('input1',input1.shape,'output1',output1.shape)
     input1 = input1.to(device)
@@ -192,7 +188,7 @@ def main():
     X, Y = X_set[iter_num % X_set.size(0):iter_num % X_set.size(0) + 10],  Y_set[iter_num % Y_set.size(0):iter_num % Y_set.size(0) + 10]
 
 
-    while True:
+    while False:
 
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
