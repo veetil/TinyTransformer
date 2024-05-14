@@ -142,7 +142,8 @@ def main():
     output1 = output1.to(device)
     print("calling model input1")
     output, loss = model(input1,output1)
-
+    print("output",output.shape,"loss",loss.item(),'rank',ddp_local_rank)
+    
     # Backward pass
     for param_group in optimizer.param_groups:
         param_group['lr'] = learning_rate
