@@ -276,30 +276,33 @@ def main():
                     f.write(f"{all_expert_weights[i]}\n")
 """        
         ## eval model on sample random input and check if correct
-        if iter_num % max_iters_check == 0 and ddp_local_rank == 0 : 
+        if iter_num % max_iters_check == 0  : 
+            dist.barrier()
 
+            if ddp_local_rank == 0 : 
+                model.eval()
+                with torch.no_grad(), ctx:
+                    X = torch.rand(10, config_.BLOCK_SIZE, config_.EMBED)
+                    Y = torch.pow(X, 1.5)
+                    X = X.to(device)
+                    Y = Y.to(device)
+
+                    logits, loss = model(X, Y)
+                model.train()
             
-            model.eval()
-            with torch.no_grad(), ctx:
-                X = torch.rand(10, config_.BLOCK_SIZE, config_.EMBED)
-                Y = torch.pow(X, 1.5)
-                X = X.to(device)
-                Y = Y.to(device)
-
-                logits, loss = model(X, Y)
-            model.train()
-
+                print(f"Rank {ddp_local_rank}, eval loss: {loss.item()}")
+                print(f"Rank {ddp_local_rank}, eval logits: {logits[0][0]}")
+                print(f"Rank {ddp_local_rank}, eval Y: {Y[0][0]}")
+                ## for 10 random embeds in X abve, check if Y is correct
             
-            print(f"Rank {ddp_local_rank}, eval loss: {loss.item()}")
-            print(f"Rank {ddp_local_rank}, eval logits: {logits[0][0]}")
-            print(f"Rank {ddp_local_rank}, eval Y: {Y[0][0]}")
-            ## for 10 random embeds in X abve, check if Y is correct
-            for i in range(10):
-                sample = random.randint(0, config_.BLOCK_SIZE-1)
-                x  = X[0][sample]
-                y = Y[0][sample]
-                err = torch.norm(logits[0][sample] - y)
-                print(f"Rank {ddp_local_rank}, y is {torch.norm(y)}, logits is {torch.norm(logits[0][sample])}, err is {err}, % error is {err/torch.norm(y)*100}")
+                for i in range(10):
+                    sample = random.randint(0, config_.BLOCK_SIZE-1)
+                    x  = X[0][sample]
+                    y = Y[0][sample]
+                    err = torch.norm(logits[0][sample] - y)
+                    print(f"Rank {ddp_local_rank}, y is {torch.norm(y)}, logits is {torch.norm(logits[0][sample])}, err is {err}, % error is {err/torch.norm(y)*100}")
+
+    dist.barrier()
 
     destroy_process_group()
 
