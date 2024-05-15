@@ -279,15 +279,15 @@ class MoeLayer_ddp(nn.Module):
         expert_output = expert_output.reshape(self.world_size , -1, d_model).contiguous() # (e, c, m)
 
         combined_output = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
-
-        rank = dist.get_rank()
-        expert_wts = torch.tensor([[0., 1., 2., 3.]]).to(inputs.device)
-        mask_wts = torch.einsum('sec, de -> s',combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        combined_output_check = torch.einsum('sm, sec, de -> sm',reshaped_input,combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
-        diff = torch.norm(combined_output - combined_output_check)
-        print("Rank ", rank,"diff", diff,'output',torch.nomr(combined_output), 'output_check',torch.norm(combined_output_check))
-
         return combined_output.reshape(inputs.shape)
+
+#        rank = dist.get_rank()
+#        expert_wts = torch.tensor([[0., 1., 2., 3.]]).to(inputs.device)
+#        mask_wts = torch.einsum('sec, de -> s',combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
+#        combined_output_check = torch.einsum('sm, sec, de -> sm',reshaped_input,combine_weights*1.,expert_wts)        ## ( s,m ) ( s,e,c) (1,e)  -> ( s,m )
+#        diff = torch.norm(combined_output - combined_output_check)
+#        print("Rank ", rank,"diff", diff,'output',torch.nomr(combined_output), 'output_check',torch.norm(combined_output_check))
+
 
 
 class SelfAttentionLayer(nn.Module):
