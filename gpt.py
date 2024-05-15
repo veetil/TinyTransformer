@@ -159,6 +159,11 @@ class MoeLayer(nn.Module):
             results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
             
         return results
+    
+
+
+
+
 
 # Based on https://github.com/pytorch/pytorch/pull/40762
 class _AllToAll(torch.autograd.Function):
@@ -167,7 +172,8 @@ class _AllToAll(torch.autograd.Function):
         ctx.group = group
         input = input.contiguous()
         output = torch.empty_like(input)
-        dist.all_to_all_single(output, input, group=group)
+        req = dist.all_to_all_single(output, input, group=group, async_op=True)
+        req.wait()
         return output
 
     @staticmethod
