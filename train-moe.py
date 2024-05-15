@@ -34,6 +34,8 @@ from gpt import  GPT2Model
 from collections import namedtuple
 import wandb 
 
+import torch
+import torch.profiler
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -77,6 +79,9 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+
+os.environ['TORCH_COMPILE_DEBUG'] = '1'
+
 
 ## read the config file
 import config
@@ -284,10 +289,10 @@ for name, param in model.named_parameters():
     print(f"Parameter: {name}, Data Type: {param.dtype},  Device: {param.device}")
 
 # compile the model
-#if compile:
-#    print("compiling the model... (takes a ~minute)")
-#    unoptimized_model = model
-#    model = torch.compile(model) # requires PyTorch 2.0
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    unoptimized_model = model
+    model = torch.compile(model) # requires PyTorch 2.0
 
 ## wrap model. when model sharding, dont specify device_ids parameter
 if config.MoE == 0 or not ddp:
@@ -346,9 +351,23 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
-while True:
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+    schedule=torch.profiler.schedule(
+        wait=2,
+        warmup=2,
+        active=6,
+        repeat=1),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('./log_dir'),
+    record_shapes=True,
+    profile_memory=True,
+    with_stack=True
+) as prof:
+   while True:  
 
-    # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -427,6 +446,13 @@ while True:
     # termination conditions
     if iter_num > max_iters:
         break
+
+    prof.step()
+
+prof.export_stacks("result.prof")
+print(prof.key_averages().table(sort_by="cuda_time_total"))
+
+
 
 if ddp:
     destroy_process_group()
