@@ -10,6 +10,8 @@ from typing import List
 import torch.distributed as dist
 import os 
 from torch import Tensor
+from typing import Callable, Dict, Tuple
+
 ## This code implements the GPT-2 model as described in the paper "Language Models are Unsupervised Multitask Learners" by Radford et al.
 ## Author: Vineeth Veetil 
 ## The code is based on the OpenAI GPT-2 implementation, but has been modified to be more readable and to allow for easy modification.
@@ -180,7 +182,8 @@ class _AllToAll(torch.autograd.Function):
     def backward(ctx: Any, grad_output: Tensor) -> Tuple[Tensor, None]:
         grad_output = grad_output.contiguous()
         grad_input = torch.empty_like(grad_output)
-        dist.all_to_all_single(grad_input, grad_output, group=ctx.group)
+        req = dist.all_to_all_single(grad_input, grad_output, group=ctx.group, async_op=True)
+        req.wait()
         return grad_input, None
 
 # Based on https://github.com/pytorch/pytorch/pull/40762
@@ -192,6 +195,96 @@ def one_hot(tensor: Tensor, num_classes: int) -> Tensor:
     ret = torch.zeros(tensor.shape + (num_classes,), device=tensor.device, dtype=tensor.dtype)
     ret.scatter_(-1, tensor.unsqueeze(-1).contiguous(), 1)
     return ret
+
+gumbel_map: Dict[torch.device, Callable] = {}
+
+
+def gumbel_rsample(shape: Tuple, device: torch.device) -> Tensor:
+    gumbel = gumbel_map.get(device)
+    if gumbel is None:
+        one = torch.tensor(1.0, device=device)
+        zero = torch.tensor(0.0, device=device)
+        gumbel = torch.distributions.gumbel.Gumbel(zero, one).rsample  # type: ignore
+        gumbel_map[device] = gumbel
+    return gumbel(shape)
+
+
+
+def gating_w_capacity_limit(logits: torch.Tensor) : 
+    # NOTE(msb) softmax requires FP32: https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/
+    gates = F.softmax(logits, dim=1, dtype=torch.float)
+
+
+    # gates has shape of SE
+    num_tokens = gates.shape[0]
+    num_experts = gates.shape[1]
+
+    CAP_EXPAND = 1.5
+#    FRAC_CAPACITY = ( num_experts + 1 ) // 2
+    ## frac_capacity should lie between 1 and ( num_experts + 1 ) // 2 
+#    assert FRAC_CAPACITY >= 1 and FRAC_CAPACITY <= ( num_experts + 1 ) // 2
+
+    capacity =  2 * num_tokens * CAP_EXPAND // num_experts
+
+    assert num_tokens % num_experts == 0
+    assert capacity * num_experts >= 2 * num_tokens 
+    assert capacity  <= num_tokens 
+
+    # Create a mask for 1st's expert per token
+    indices1_s = torch.argmax(gates, dim=1)
+    mask1 = one_hot(indices1_s, num_classes=num_experts)
+
+
+    # Create a mask for 2nd's expert per token using Gumbel-max trick
+    # https://timvieira.github.io/blog/post/2014/07/31/gumbel-max-trick/
+    logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
+
+    logits_except1 = logits_w_noise.masked_fill(mask1.bool(), float("-inf"))
+    indices2_s = torch.argmax(logits_except1, dim=1)
+    mask2 = one_hot(indices2_s, num_classes=num_experts)
+
+    # Compute locations in capacity buffer
+    locations1 = torch.cumsum(mask1, dim=0) - 1
+    locations2 = torch.cumsum(mask2, dim=0) - 1
+    # Update 2nd's location by accounting for locations of 1st
+    locations2 += torch.sum(mask1, dim=0, keepdim=True)
+
+   # Compute l_aux
+    me = torch.mean(gates, dim=0)
+    ce = torch.mean(mask1.float(), dim=0)
+    l_aux = torch.mean(me * ce)
+
+    # Remove locations outside capacity from mask
+    mask1 *= torch.lt(locations1, capacity)
+    mask2 *= torch.lt(locations2, capacity)
+
+    # Store the capacity location for each token
+    locations1_s = torch.sum(locations1 * mask1, dim=1)
+    locations2_s = torch.sum(locations2 * mask2, dim=1)
+
+    # Normalize gate probabilities
+    gates1_s = (gates * mask1).sum(dim=1)  # einsum("se,se->s")
+    gates2_s = (gates * mask2).sum(dim=1)  # einsum("se,se->s")
+    denom_s = gates1_s + gates2_s
+    # Avoid divide-by-zero
+    denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
+    gates1_s /= denom_s
+    gates2_s /= denom_s
+
+    # Calculate combine_weights and dispatch_mask
+    gates1 = gates1_s.unsqueeze(-1).contiguous() * mask1  # einsum("s,se->se")
+    gates2 = gates2_s.unsqueeze(-1).contiguous() * mask2  # einsum("s,se->se")
+    locations1_sc = one_hot(locations1_s, num_classes=capacity)
+    locations2_sc = one_hot(locations2_s, num_classes=capacity)
+    combine1_sec = gates1.unsqueeze(2).contiguous() * locations1_sc.unsqueeze(1).contiguous()  # einsum("se,sc->sec")
+    combine2_sec = gates2.unsqueeze(2).contiguous() * locations2_sc.unsqueeze(1).contiguous()  # einsum("se,sc->sec")
+    combine_weights = combine1_sec + combine2_sec
+    dispatch_mask = combine_weights.bool()
+
+
+    return combine_weights.to(logits.dtype), dispatch_mask
+
+
 
 def gating(logits: torch.Tensor) : 
     # NOTE(msb) softmax requires FP32: https://docs.nvidia.com/deeplearning/performance/mixed-precision-training/
@@ -271,7 +364,7 @@ class MoeLayer_ddp(nn.Module):
         reshaped_input = inputs.reshape(-1, d_model).contiguous() # (s , m)
 
         logits = self.gate(reshaped_input) # (s, e)
-        combine_weights, dispatch_mask = gating(logits) # (s, e, c), (s, e, c)
+        combine_weights, dispatch_mask = gating_w_capacity_limit(logits) # (s, e, c), (s, e, c)
         dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.float(), reshaped_input) # (e, c, m)
         dispatched_input = _AllToAll.apply(dispatched_input, self.group)
 
