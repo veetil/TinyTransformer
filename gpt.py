@@ -135,6 +135,8 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+
+
 class MoeLayer(nn.Module):
     def __init__(self, experts: List[nn.Module], gate: nn.Module, config ):
         super().__init__()
@@ -163,13 +165,31 @@ class MoeLayer(nn.Module):
             results[batch_idx,token_idx] += weights[batch_idx, token_idx, nth_expert, None] * expert(inputs[batch_idx, token_idx])
             
         return results
-    
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        x[:, :, :, None, :]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
+
 class SelfAttentionLayer(nn.Module):
     def __init__(self, config): 
         super().__init__()
         self.config = config
         assert( config.EMBED % config.N_HEAD == 0 ) 
-        self.c_attn = nn.Linear( config.EMBED , 3*config.EMBED, bias = config.bias )
+
+        self.n_rep = self.config.N_HEAD // self.config.N_KV_HEAD
+        ## size of Q is config.EMBED, size of K is config.EMBED // self.n_rep, size of V is config.EMBED // self.n_rep
+        c_attn_dim2 = config.EMBED +  2*config.EMBED // self.n_rep
+
+#        self.c_attn = nn.Linear( config.EMBED , 3*config.EMBED, bias = config.bias )
+        self.c_attn = nn.Linear( config.EMBED , c_attn_dim2 , bias = config.bias )
 
         self.attn_dropout = nn.Dropout(config.ATTN_DROPOUT )
         self.c_proj = nn.Linear( config.EMBED , config.EMBED, bias = config.bias )
@@ -184,10 +204,26 @@ class SelfAttentionLayer(nn.Module):
     def forward(self,x,freqs_cis = None):
         B, T, C = x.size()
 
-        q, k, v =  self.c_attn(x).split(self.config.EMBED, dim = 2 )
+#        q, k, v =  self.c_attn(x).split(self.config.EMBED, dim = 2 )
+        q, k, v =  self.c_attn(x).split([self.config.EMBED, self.config.EMBED // self.n_rep, self.config.EMBED // self.n_rep], dim = 2 )
+
         q = q.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2) # B, nh, T, C//nh 
-        k = k.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
-        v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
+
+
+        #k = k.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
+        #v = v.view( B, T, self.config.N_HEAD, C // self.config.N_HEAD  ).transpose(1,2)
+
+        k = k.view( B, T, self.config.N_KV_HEAD, C // self.config.N_HEAD  )
+        v = v.view( B, T, self.config.N_KV_HEAD, C // self.config.N_HEAD  )
+        # repeat k/v heads if n_kv_heads < n_heads
+
+        k = repeat_kv(
+            k, self.n_rep
+        ).transpose(1,2)  # (B, nh, T, hs )
+        v = repeat_kv(
+            v, self.n_rep
+        ).transpose(1,2)  # (B, nh, T, hs )
+
 
         if self.config.ROTARY_EMBED == 1 : 
 #            print("applying rotary embedding in attention layer")
