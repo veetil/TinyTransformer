@@ -265,6 +265,7 @@ class GPT2Block(nn.Module):
         super().__init__()
         self.config = config 
 
+        assert self.config.LAYER_SHARE == 1 or self.config.LAYER_SHARE == 2, "LAYER_SHARE must be 1 or 2"
         if config.RMS_NORM == 0 : 
             self.ln_1 = nn.LayerNorm(config.EMBED, eps=config.EPS, bias = config.bias)
         else:
@@ -294,15 +295,20 @@ class GPT2Block(nn.Module):
             self.mlp =  FeedForwardLayer( config ) 
 
 
+    ## MobileLLM paper proposes weight sharing between consecutive layers for cases where latency is memory bound. this 
+    ## increases the depth of the model without increasing model param size. Also consistent with their finding 
+    ## that tall, lanky models outperform short, wide models.
+    ## Implementing this is straightforward, just run the same layer LAYER_SHARE times. 
     def forward(self,x,freqs_cis = None):
-        x_ = self.ln_1(x)
-        if self.config.ROTARY_EMBED == 0 : 
-            x = x +  self.attn(x_)
-        else:
-            x = x +  self.attn(x_,freqs_cis)
+        for _ in range(self.config.LAYER_SHARE): 
+            x_ = self.ln_1(x)
+            if self.config.ROTARY_EMBED == 0 : 
+                x = x +  self.attn(x_)
+            else:
+                x = x +  self.attn(x_,freqs_cis)
 
-        x_ = self.ln_2(x)
-        x = x + self.mlp(x_) 
+            x_ = self.ln_2(x)
+            x = x + self.mlp(x_) 
         return x 
 
 class GPT2Model( nn.Module ):
